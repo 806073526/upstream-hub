@@ -26,7 +26,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog"
 import { useChannels, useChannelRates } from "@/lib/queries"
 import { apiFetch } from "@/lib/api"
 import { useTriggerRefresh } from "@/lib/refresh-context"
-import { channelTypeLabel, money, relativeTime } from "@/lib/format"
+import { channelTypeLabel, formatRatio, money, relativeTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { syncChannelStream, testLoginStream, type ProgressEvent } from "@/lib/sync-stream"
 import type { Channel } from "@/lib/api-types"
@@ -135,7 +135,7 @@ function InlineRates({ channelID }: { channelID: number }) {
                   )}
                 >
                   <span className="font-medium">{r.model_name}</span>
-                  <span className="font-semibold tabular-nums">{r.ratio.toFixed(2)}</span>
+                  <span className="font-semibold tabular-nums">{formatRatio(r.ratio)}</span>
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top" className="max-w-xs text-xs">
@@ -180,6 +180,7 @@ const stageLabel: Record<ProgressEvent["stage"], string> = {
   login: "登录",
   balance: "余额",
   rates: "倍率",
+  usage: "用量",
   done: "完成",
   error: "失败",
 }
@@ -190,6 +191,7 @@ const stageOrder: Record<ProgressEvent["stage"], number> = {
   login: 3,
   balance: 4,
   rates: 5,
+  usage: 6,
   done: 9,
   error: 9,
 }
@@ -442,6 +444,8 @@ export function ChannelCards() {
                 <div className="mt-3 divide-y divide-border">
                   <Row label="余额">{money(c.last_balance)}</Row>
                   <Row label="阈值">{c.balance_threshold > 0 ? money(c.balance_threshold) : "未设置"}</Row>
+                  <Row label="累计用量">{money(c.last_usage_total)}</Row>
+                  <Row label="今日用量">{money(c.last_usage_today)}</Row>
                   <Row label="状态">
                     <span className={cn("inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium", meta.cls)}>
                       {meta.label}

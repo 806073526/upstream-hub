@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -25,6 +26,7 @@ func registerChannels(g *gin.RouterGroup, d *Deps) {
 	gp.POST("/:id/test-login", func(c *gin.Context) { testLogin(c, d) })
 	gp.POST("/:id/refresh-balance", func(c *gin.Context) { refreshBalance(c, d) })
 	gp.POST("/:id/refresh-rates", func(c *gin.Context) { refreshRates(c, d) })
+	gp.POST("/:id/refresh-usage", func(c *gin.Context) { refreshUsage(c, d) })
 	gp.POST("/:id/sync", func(c *gin.Context) { syncChannel(c, d) })
 	gp.GET("/:id/rates", func(c *gin.Context) { channelRates(c, d) })
 	gp.GET("/:id/balance-history", func(c *gin.Context) { balanceHistory(c, d) })
@@ -216,6 +218,24 @@ func refreshRates(c *gin.Context, d *Deps) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func refreshUsage(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	ch, err := d.Channels.FindByID(id)
+	if err != nil {
+		fail(c, http.StatusNotFound, err)
+		return
+	}
+	if err := d.Monitor.RefreshUsage(c.Request.Context(), ch); err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func channelRates(c *gin.Context, d *Deps) {
 	id, err := uintParam(c, "id")
 	if err != nil {
@@ -331,18 +351,20 @@ func syncChannel(c *gin.Context, d *Deps) {
 	obs := setupSSE(c)
 	ctx := progress.WithObserver(c.Request.Context(), obs)
 
-	// 串行执行：先余额，再倍率。任一步失败仍尝试下一个，但用 done 表示整体状态。
+	// 串行执行：余额、倍率、用量。任一步失败仍尝试后续步骤。
 	balErr := d.Monitor.RefreshBalance(ctx, ch)
 	rateErr := d.Monitor.RefreshRates(ctx, ch)
+	usageErr := d.Monitor.RefreshUsage(ctx, ch)
 
-	switch {
-	case balErr != nil && rateErr != nil:
-		progress.Fail(ctx, progress.StageError, balErr.Error()+" | "+rateErr.Error())
-	case balErr != nil:
-		progress.Fail(ctx, progress.StageError, balErr.Error())
-	case rateErr != nil:
-		progress.Fail(ctx, progress.StageError, rateErr.Error())
-	default:
+	errors := make([]string, 0, 3)
+	for _, err := range []error{balErr, rateErr, usageErr} {
+		if err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	if len(errors) == 0 {
 		progress.OK(ctx, progress.StageDone, "同步完成")
+	} else {
+		progress.Fail(ctx, progress.StageError, strings.Join(errors, " | "))
 	}
 }

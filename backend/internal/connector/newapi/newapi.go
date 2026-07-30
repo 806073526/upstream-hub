@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +28,7 @@ type Client struct {
 
 func New() *Client {
 	c := resty.New().
-		SetTimeout(30 * time.Second).
+		SetTimeout(30*time.Second).
 		SetHeader("User-Agent", "upstream-hub/0.1").
 		SetHeader("Accept", "application/json")
 	return &Client{http: c}
@@ -150,8 +152,164 @@ func (c *Client) GetBalance(ctx context.Context, ch *connector.Channel, session 
 	}, nil
 }
 
+func (c *Client) GetUsage(ctx context.Context, ch *connector.Channel, session *connector.AuthSession, query connector.UsageQuery) (*connector.UsageResult, error) {
+	now := query.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+	location, err := time.LoadLocation(query.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("newapi usage timezone: %w", err)
+	}
+
+	site := strings.TrimRight(ch.SiteURL, "/")
+	statusBody, err := c.getJSON(ctx, site+"/api/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("newapi status: %w", err)
+	}
+	var status struct {
+		QuotaPerUnit float64 `json:"quota_per_unit"`
+	}
+	if err := json.Unmarshal(statusBody, &status); err != nil {
+		return nil, fmt.Errorf("newapi status decode: %w", err)
+	}
+	if status.QuotaPerUnit <= 0 {
+		status.QuotaPerUnit = 500000
+	}
+
+	selfBody, err := c.getJSON(ctx, site+"/api/user/self", session)
+	if err != nil {
+		return nil, fmt.Errorf("newapi self: %w", err)
+	}
+	var self struct {
+		UsedQuota float64 `json:"used_quota"`
+	}
+	if err := json.Unmarshal(selfBody, &self); err != nil {
+		return nil, fmt.Errorf("newapi self decode: %w", err)
+	}
+	total := self.UsedQuota / status.QuotaPerUnit
+
+	localNow := now.In(location)
+	todayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location).UTC()
+	todayQuota, err := c.getUsageQuota(ctx, site, session, todayStart, now)
+	if err != nil {
+		return nil, fmt.Errorf("newapi today usage: %w", err)
+	}
+	today := todayQuota / status.QuotaPerUnit
+
+	bucketEnd := now.Truncate(5 * time.Minute)
+	bucketStart := bucketEnd.Add(-5 * time.Minute)
+	bucketQuota, err := c.getUsageQuota(ctx, site, session, bucketStart, bucketEnd)
+	if err != nil {
+		return nil, fmt.Errorf("newapi five-minute usage: %w", err)
+	}
+
+	buckets := []connector.UsageBucketResult{{
+		StartAt:           bucketStart,
+		EndAt:             bucketEnd,
+		ResolutionSeconds: 300,
+		Amount:            bucketQuota / status.QuotaPerUnit,
+		Currency:          "USD",
+		Source:            "newapi_stat",
+		Quality:           connector.UsageQualityExact,
+		Complete:          true,
+	}}
+	if !query.HistorySince.IsZero() {
+		historyBody, historyErr := c.getJSON(ctx, site+"/api/data/self?start_timestamp="+
+			strconv.FormatInt(query.HistorySince.UTC().Unix(), 10)+"&end_timestamp="+
+			strconv.FormatInt(now.Unix()-1, 10), session)
+		if historyErr == nil {
+			hourly, decodeErr := decodeHourlyUsage(historyBody, status.QuotaPerUnit, query.HistorySince.UTC(), now)
+			if decodeErr != nil {
+				return nil, fmt.Errorf("newapi hourly usage decode: %w", decodeErr)
+			}
+			buckets = append(buckets, hourly...)
+		}
+	}
+
+	return &connector.UsageResult{
+		TotalAmount: &total,
+		TodayAmount: &today,
+		Currency:    "USD",
+		ObservedAt:  now,
+		Buckets:     buckets,
+	}, nil
+}
+
+func decodeHourlyUsage(body []byte, quotaPerUnit float64, since, now time.Time) ([]connector.UsageBucketResult, error) {
+	var rows []struct {
+		CreatedAt int64   `json:"created_at"`
+		Quota     float64 `json:"quota"`
+	}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, err
+	}
+	amounts := make(map[int64]float64)
+	for _, row := range rows {
+		startAt := time.Unix(row.CreatedAt, 0).UTC().Truncate(time.Hour)
+		if startAt.Before(since) || !startAt.Before(now) {
+			continue
+		}
+		amounts[startAt.Unix()] += row.Quota / quotaPerUnit
+	}
+	starts := make([]int64, 0, len(amounts))
+	for start := range amounts {
+		starts = append(starts, start)
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+	buckets := make([]connector.UsageBucketResult, 0, len(starts))
+	for _, start := range starts {
+		startAt := time.Unix(start, 0).UTC()
+		endAt := startAt.Add(time.Hour)
+		buckets = append(buckets, connector.UsageBucketResult{
+			StartAt:           startAt,
+			EndAt:             endAt,
+			ResolutionSeconds: 3600,
+			Amount:            math.Round(amounts[start]*1e8) / 1e8,
+			Currency:          "USD",
+			Source:            "newapi_data",
+			Quality:           connector.UsageQualityExact,
+			Complete:          !endAt.After(now),
+		})
+	}
+	return buckets, nil
+}
+
+func (c *Client) getUsageQuota(ctx context.Context, site string, session *connector.AuthSession, start, end time.Time) (float64, error) {
+	if !end.After(start) {
+		return 0, errors.New("usage end must be after start")
+	}
+	url := site + "/api/log/self/stat?type=2&start_timestamp=" + strconv.FormatInt(start.UTC().Unix(), 10) +
+		"&end_timestamp=" + strconv.FormatInt(end.UTC().Unix()-1, 10)
+	body, err := c.getJSON(ctx, url, session)
+	if err != nil {
+		return 0, err
+	}
+	var stat struct {
+		Quota float64 `json:"quota"`
+	}
+	if err := json.Unmarshal(body, &stat); err != nil {
+		return 0, err
+	}
+	return stat.Quota, nil
+}
+
 func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) ([]connector.RateResult, error) {
-	body, err := c.getJSON(ctx, strings.TrimRight(ch.SiteURL, "/")+"/api/user/self/groups", session)
+	site := strings.TrimRight(ch.SiteURL, "/")
+	tokenBody, err := c.getJSON(ctx, site+"/api/token/?p=0&size=100", session)
+	if err != nil {
+		return nil, fmt.Errorf("newapi tokens: %w", err)
+	}
+	linkedGroups, err := decodeLinkedTokenGroups(tokenBody)
+	if err != nil {
+		return nil, fmt.Errorf("newapi tokens decode: %w", err)
+	}
+	if len(linkedGroups) == 0 {
+		return []connector.RateResult{}, nil
+	}
+
+	body, err := c.getJSON(ctx, site+"/api/user/self/groups", session)
 	if err != nil {
 		return nil, fmt.Errorf("newapi groups: %w", err)
 	}
@@ -165,6 +323,9 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 	}
 	out := make([]connector.RateResult, 0, len(raw))
 	for name, v := range raw {
+		if _, ok := linkedGroups[name]; !ok {
+			continue
+		}
 		var ratio float64
 		if err := json.Unmarshal(v.Ratio, &ratio); err != nil {
 			// "auto" 组的 ratio 是字符串 "自动"，跳过。
@@ -177,6 +338,41 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 		})
 	}
 	return out, nil
+}
+
+func decodeLinkedTokenGroups(body []byte) (map[string]struct{}, error) {
+	type token struct {
+		Group  string `json:"group"`
+		Status *int   `json:"status"`
+	}
+
+	var items []token
+	if strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, err
+		}
+	} else {
+		var page struct {
+			Items *[]token `json:"items"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, err
+		}
+		if page.Items == nil {
+			return nil, errors.New("missing token items")
+		}
+		items = *page.Items
+	}
+
+	groups := make(map[string]struct{})
+	for _, item := range items {
+		group := strings.TrimSpace(item.Group)
+		if group == "" || (item.Status != nil && *item.Status != 1) {
+			continue
+		}
+		groups[group] = struct{}{}
+	}
+	return groups, nil
 }
 
 func (c *Client) getJSON(ctx context.Context, url string, session *connector.AuthSession) ([]byte, error) {

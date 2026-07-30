@@ -9,9 +9,9 @@ type Channels struct{ db *gorm.DB }
 
 func NewChannels(db *gorm.DB) *Channels { return &Channels{db: db} }
 
-func (r *Channels) Create(c *Channel) error          { return r.db.Create(c).Error }
-func (r *Channels) Update(c *Channel) error          { return r.db.Save(c).Error }
-func (r *Channels) Delete(id uint) error             { return r.db.Delete(&Channel{}, id).Error }
+func (r *Channels) Create(c *Channel) error { return r.db.Create(c).Error }
+func (r *Channels) Update(c *Channel) error { return r.db.Save(c).Error }
+func (r *Channels) Delete(id uint) error    { return r.db.Delete(&Channel{}, id).Error }
 func (r *Channels) FindByID(id uint) (*Channel, error) {
 	var c Channel
 	if err := r.db.First(&c, id).Error; err != nil {
@@ -21,7 +21,11 @@ func (r *Channels) FindByID(id uint) (*Channel, error) {
 }
 func (r *Channels) List() ([]Channel, error) {
 	var list []Channel
-	if err := r.db.Order("id ASC").Find(&list).Error; err != nil {
+	if err := r.db.
+		Select("channels.*").
+		Joins("LEFT JOIN (SELECT channel_id, MIN(ratio) AS min_ratio FROM rate_snapshots GROUP BY channel_id) AS channel_min_rates ON channel_min_rates.channel_id = channels.id").
+		Order("channel_min_rates.min_ratio ASC NULLS LAST, channels.id ASC").
+		Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil

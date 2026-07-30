@@ -47,6 +47,16 @@ func (r *Rates) Upsert(snapshot *RateSnapshot) (*RateSnapshot, error) {
 	}
 }
 
+// DeleteExcept 删除渠道中不在当前有效分组集合内的倍率快照。
+// modelNames 为空表示该渠道没有任何有效 Key，删除该渠道的全部快照。
+func (r *Rates) DeleteExcept(channelID uint, modelNames []string) error {
+	query := r.db.Where("channel_id = ?", channelID)
+	if len(modelNames) > 0 {
+		query = query.Where("model_name NOT IN ?", modelNames)
+	}
+	return query.Delete(&RateSnapshot{}).Error
+}
+
 func (r *Rates) AppendChange(log *RateChangeLog) error {
 	if log.ChangedAt.IsZero() {
 		log.ChangedAt = time.Now()
@@ -110,6 +120,17 @@ type DailyAggregate struct {
 // 实现：对每个 (channel_id, day) 取该天最后一次 BalanceSnapshot 的余额，再按 day 求和。
 // 没有采样的日子返回 0；调用方应自己外推 / 留空。
 func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
+	return r.aggregateBalanceTrend(days, nil)
+}
+
+func (r *Rates) AggregateBalanceTrendForChannels(days int, channelIDs []uint) ([]DailyAggregate, error) {
+	if len(channelIDs) == 0 {
+		return []DailyAggregate{}, nil
+	}
+	return r.aggregateBalanceTrend(days, channelIDs)
+}
+
+func (r *Rates) aggregateBalanceTrend(days int, channelIDs []uint) ([]DailyAggregate, error) {
 	if days <= 0 {
 		days = 7
 	}
@@ -119,7 +140,7 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 		Balance float64
 	}
 	var rows []row
-	err := r.db.Raw(`
+	query := `
 		WITH per_day AS (
 			SELECT
 				channel_id,
@@ -127,6 +148,13 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 				MAX(sampled_at)               AS last_at
 			FROM balance_snapshots
 			WHERE sampled_at >= ?
+	`
+	args := []any{since}
+	if len(channelIDs) > 0 {
+		query += "\t\t\tAND channel_id IN ?\n"
+		args = append(args, channelIDs)
+	}
+	query += `
 			GROUP BY channel_id, date_trunc('day', sampled_at)
 		)
 		SELECT pd.day AS day, SUM(bs.balance) AS balance
@@ -135,7 +163,8 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 		  ON bs.channel_id = pd.channel_id AND bs.sampled_at = pd.last_at
 		GROUP BY pd.day
 		ORDER BY pd.day ASC
-	`, since).Scan(&rows).Error
+	`
+	err := r.db.Raw(query, args...).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +180,17 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 // 实现与日趋势一致：对每个 (channel_id, hour) 取该小时最后一次 BalanceSnapshot，
 // 再按 hour 求和，用于展示一天内余额波动。
 func (r *Rates) AggregateBalanceTrendHourly(hours int) ([]DailyAggregate, error) {
+	return r.aggregateBalanceTrendHourly(hours, nil)
+}
+
+func (r *Rates) AggregateBalanceTrendHourlyForChannels(hours int, channelIDs []uint) ([]DailyAggregate, error) {
+	if len(channelIDs) == 0 {
+		return []DailyAggregate{}, nil
+	}
+	return r.aggregateBalanceTrendHourly(hours, channelIDs)
+}
+
+func (r *Rates) aggregateBalanceTrendHourly(hours int, channelIDs []uint) ([]DailyAggregate, error) {
 	if hours <= 0 {
 		hours = 24
 	}
@@ -160,7 +200,7 @@ func (r *Rates) AggregateBalanceTrendHourly(hours int) ([]DailyAggregate, error)
 		Balance float64
 	}
 	var rows []row
-	err := r.db.Raw(`
+	query := `
 		WITH per_hour AS (
 			SELECT
 				channel_id,
@@ -168,6 +208,13 @@ func (r *Rates) AggregateBalanceTrendHourly(hours int) ([]DailyAggregate, error)
 				MAX(sampled_at)                AS last_at
 			FROM balance_snapshots
 			WHERE sampled_at >= ?
+	`
+	args := []any{since}
+	if len(channelIDs) > 0 {
+		query += "\t\t\tAND channel_id IN ?\n"
+		args = append(args, channelIDs)
+	}
+	query += `
 			GROUP BY channel_id, date_trunc('hour', sampled_at)
 		)
 		SELECT ph.hour AS day, SUM(bs.balance) AS balance
@@ -176,7 +223,8 @@ func (r *Rates) AggregateBalanceTrendHourly(hours int) ([]DailyAggregate, error)
 		  ON bs.channel_id = ph.channel_id AND bs.sampled_at = ph.last_at
 		GROUP BY ph.hour
 		ORDER BY ph.hour ASC
-	`, since).Scan(&rows).Error
+	`
+	err := r.db.Raw(query, args...).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}

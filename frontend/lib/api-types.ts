@@ -22,7 +22,7 @@ export type CaptchaProviderType =
   | "anticaptcha"
   | "yescaptcha"
 
-export type MonitorJob = "login" | "balance" | "rates"
+export type MonitorJob = "login" | "balance" | "rates" | "usage"
 
 export type NotificationEvent =
   | "balance_low"
@@ -44,6 +44,10 @@ export interface Channel {
   monitor_enabled: boolean
   last_balance?: number | null
   last_balance_at?: string | null
+  last_usage_total?: number | null
+  last_usage_today?: number | null
+  usage_currency?: string
+  last_usage_at?: string | null
   last_error?: string
   created_at: string
   updated_at: string
@@ -156,4 +160,38 @@ export interface DashboardSummary {
 export interface BalanceTrendPoint {
   day: string
   balance: number
+}
+
+export type UsageTrendRange = "1h" | "today" | "24h" | "7d" | "30d"
+export type UsagePointQuality = "exact" | "observed" | "mixed" | "missing"
+
+export interface UsageTrendChannel {
+  id: number
+  name: string
+  type: ChannelType
+  currency: string
+}
+
+export interface UsageTrendPoint {
+  start_at: string
+  end_at: string
+  total_amount: number | null
+  channel_amounts: Record<string, number>
+  quality: UsagePointQuality
+  complete: boolean
+  missing_channel_ids: number[]
+}
+
+export interface UsageTrendResponse {
+  range: UsageTrendRange
+  start_at: string
+  end_at: string
+  source_resolution_seconds: number
+  output_resolution_seconds: number
+  currency: string
+  channels: UsageTrendChannel[]
+  points: UsageTrendPoint[]
+  range_total_amount: number | null
+  channel_totals: Record<string, number>
+  complete: boolean
 }

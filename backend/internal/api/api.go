@@ -29,6 +29,7 @@ type Deps struct {
 	Captchas   *storage.Captchas
 	Notifies   *storage.Notifications
 	Rates      *storage.Rates
+	Usage      *storage.Usage
 	MonLogs    *storage.MonitorLogs
 	ChannelSvc *channel.Service
 	Monitor    *monitor.Service

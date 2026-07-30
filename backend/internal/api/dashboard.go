@@ -1,16 +1,41 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/worryzyy/upstream-hub/internal/businessclock"
+	"github.com/worryzyy/upstream-hub/internal/storage"
 )
+
+var usageTrendNow = time.Now
 
 // registerDashboard 提供首页所需聚合视图。
 func registerDashboard(g *gin.RouterGroup, d *Deps) {
 	g.GET("/dashboard/summary", func(c *gin.Context) { dashboardSummary(c, d) })
 	g.GET("/dashboard/balance-trend", func(c *gin.Context) { dashboardBalanceTrend(c, d) })
+	g.GET("/dashboard/usage-trend", func(c *gin.Context) { dashboardUsageTrend(c, d) })
+}
+
+type dashboardUsageChannel struct {
+	ID       uint   `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Currency string `json:"currency"`
+}
+
+type dashboardUsagePoint struct {
+	StartAt           time.Time        `json:"start_at"`
+	EndAt             time.Time        `json:"end_at"`
+	TotalAmount       *float64         `json:"total_amount"`
+	ChannelAmounts    map[uint]float64 `json:"channel_amounts"`
+	Quality           string           `json:"quality"`
+	Complete          bool             `json:"complete"`
+	MissingChannelIDs []uint           `json:"missing_channel_ids"`
 }
 
 type dashboardLowest struct {
@@ -90,12 +115,22 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 }
 
 func dashboardBalanceTrend(c *gin.Context, d *Deps) {
+	channelIDs, filtered, err := parseBalanceChannelIDs(c.GetQuery("channel_ids"))
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
 	if c.DefaultQuery("bucket", "day") == "hour" {
 		hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
 		if hours <= 0 {
 			hours = 24
 		}
-		trend, err := d.Rates.AggregateBalanceTrendHourly(hours)
+		var trend []storage.DailyAggregate
+		if filtered {
+			trend, err = d.Rates.AggregateBalanceTrendHourlyForChannels(hours, channelIDs)
+		} else {
+			trend, err = d.Rates.AggregateBalanceTrendHourly(hours)
+		}
 		if err != nil {
 			fail(c, http.StatusInternalServerError, err)
 			return
@@ -108,10 +143,114 @@ func dashboardBalanceTrend(c *gin.Context, d *Deps) {
 	if days <= 0 {
 		days = 7
 	}
-	trend, err := d.Rates.AggregateBalanceTrend(days)
+	var trend []storage.DailyAggregate
+	if filtered {
+		trend, err = d.Rates.AggregateBalanceTrendForChannels(days, channelIDs)
+	} else {
+		trend, err = d.Rates.AggregateBalanceTrend(days)
+	}
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": trend})
+}
+
+func parseBalanceChannelIDs(raw string, provided bool) ([]uint, bool, error) {
+	if !provided {
+		return nil, false, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return []uint{}, true, nil
+	}
+
+	ids := make([]uint, 0)
+	seen := make(map[uint]struct{})
+	for _, value := range strings.Split(raw, ",") {
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed == 0 {
+			return nil, false, fmt.Errorf("invalid channel_ids value %q", value)
+		}
+		id := uint(parsed)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, true, nil
+}
+
+func dashboardUsageTrend(c *gin.Context, d *Deps) {
+	location, err := businessclock.Location()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	rangeID := c.DefaultQuery("range", "24h")
+	spec, err := storage.ResolveUsageTrendSpec(rangeID, usageTrendNow(), location)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	channels, err := d.Channels.List()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	channelIDs := make([]uint, 0, len(channels))
+	channelMeta := make([]dashboardUsageChannel, 0, len(channels))
+	for _, channel := range channels {
+		channelIDs = append(channelIDs, channel.ID)
+		currency := channel.UsageCurrency
+		if currency == "" {
+			currency = "USD"
+		}
+		channelMeta = append(channelMeta, dashboardUsageChannel{
+			ID: channel.ID, Name: channel.Name, Type: string(channel.Type), Currency: currency,
+		})
+	}
+	buckets, err := d.Usage.ListBuckets(spec.StartAt, spec.EndAt, spec.SourceResolutionSeconds)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	trend := storage.BuildUsageTrend(buckets, spec, location, channelIDs)
+	points := make([]dashboardUsagePoint, 0, len(trend))
+	channelTotals := make(map[uint]float64)
+	var rangeTotal float64
+	hasRangeData := false
+	rangeComplete := len(trend) > 0
+	for _, point := range trend {
+		var totalAmount *float64
+		if point.HasData {
+			amount := point.TotalAmount
+			totalAmount = &amount
+			rangeTotal += point.TotalAmount
+			hasRangeData = true
+			for channelID, amount := range point.ChannelAmounts {
+				channelTotals[channelID] += amount
+			}
+		}
+		if !point.Complete {
+			rangeComplete = false
+		}
+		points = append(points, dashboardUsagePoint{
+			StartAt: point.StartAt, EndAt: point.EndAt, TotalAmount: totalAmount,
+			ChannelAmounts: point.ChannelAmounts, Quality: point.Quality, Complete: point.Complete,
+			MissingChannelIDs: point.MissingChannelIDs,
+		})
+	}
+	var rangeTotalAmount *float64
+	if hasRangeData {
+		rangeTotalAmount = &rangeTotal
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"range": rangeID, "start_at": spec.StartAt, "end_at": spec.EndAt,
+		"source_resolution_seconds": spec.SourceResolutionSeconds,
+		"output_resolution_seconds": spec.OutputResolutionSeconds,
+		"currency":                  "USD", "channels": channelMeta, "points": points,
+		"range_total_amount": rangeTotalAmount, "channel_totals": channelTotals,
+		"complete": rangeComplete,
+	}})
 }

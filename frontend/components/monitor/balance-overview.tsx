@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useBalanceTrend, useDashboardSummary, type BalanceTrendRange } from "@/lib/queries"
@@ -64,21 +64,47 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 
 export function BalanceOverview() {
   const [range, setRange] = useState<BalanceTrendRange>("7d")
-  const trend = useBalanceTrend(range)
+  const [disabledChannelIDs, setDisabledChannelIDs] = useState<Set<number>>(() => new Set())
   const summary = useDashboardSummary()
+  const channels = summary.data?.channels ?? []
+  const selectedChannelIDs = useMemo(() => {
+    if (disabledChannelIDs.size === 0) return undefined
+    return channels.filter((channel) => !disabledChannelIDs.has(channel.id)).map((channel) => channel.id)
+  }, [channels, disabledChannelIDs])
+  const trend = useBalanceTrend(range, selectedChannelIDs)
 
   const data = (trend.data ?? []).map((p) => ({
     day: range === "24h" ? formatHour(p.day) : formatDay(p.day),
     balance: p.balance,
   }))
 
-  const channels = summary.data?.channels ?? []
+  const currentTotal = summary.data == null
+    ? null
+    : channels.reduce((total, channel) => (
+      disabledChannelIDs.has(channel.id) ? total : total + (channel.last_balance ?? 0)
+    ), 0)
+  const allDisabled = channels.length > 0 && selectedChannelIDs?.length === 0
   const yMax = data.length > 0 ? niceCeil(Math.max(...data.map((d) => d.balance))) : 10
 
+  function toggleChannel(channelID: number) {
+    setDisabledChannelIDs((current) => {
+      const next = new Set(current)
+      if (next.has(channelID)) next.delete(channelID)
+      else next.add(channelID)
+      return next
+    })
+  }
+
   return (
-    <Card className="border border-border shadow-none lg:h-100">
+    <Card data-testid="balance-overview" className="h-100 border border-border shadow-none">
       <CardHeader className="flex shrink-0 flex-row items-center justify-between pb-2">
-        <CardTitle className="text-base font-semibold">{"余额概览"}</CardTitle>
+        <div className="min-w-0">
+          <CardTitle className="text-base font-semibold">{"余额概览"}</CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {"当前合计 "}
+            <strong className="font-semibold text-foreground">{money(currentTotal)}</strong>
+          </p>
+        </div>
         <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/30 p-0.5">
           {([
             ["7d", "7 天"],
@@ -102,7 +128,11 @@ export function BalanceOverview() {
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 w-full flex-1">
-          {trend.loading ? (
+          {allDisabled ? (
+            <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
+              {"全部渠道已移除统计，可从下方图例重新启用"}
+            </div>
+          ) : trend.loading ? (
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{"加载中…"}</div>
           ) : data.length === 0 ? (
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -147,17 +177,32 @@ export function BalanceOverview() {
             {channels.map((c) => {
               const isFailed = !!c.last_error
               const isUnknown = c.last_balance == null
+              const selected = !disabledChannelIDs.has(c.id)
               return (
-                <span key={c.id} className="inline-flex items-center gap-1.5 text-xs">
+                <button
+                  key={c.id}
+                  type="button"
+                  aria-pressed={selected}
+                  aria-label={`${c.name}，${selected ? "已纳入统计" : "已移除统计"}`}
+                  onClick={() => toggleChannel(c.id)}
+                  className={cn(
+                    "inline-flex min-h-7 items-center gap-1.5 text-xs transition-colors",
+                    selected ? "text-foreground" : "text-muted-foreground/50 hover:text-muted-foreground",
+                  )}
+                >
                   <span
                     className={cn(
                       "size-2 rounded-full",
-                      isFailed ? "bg-danger" : isUnknown ? "bg-muted-foreground/40" : "bg-success",
+                      !selected
+                        ? "bg-muted-foreground/40"
+                        : isFailed ? "bg-danger" : isUnknown ? "bg-muted-foreground/40" : "bg-success",
                     )}
                   />
-                  <span className="font-medium text-foreground">{c.name}</span>
-                  <span className="tabular-nums text-muted-foreground">{money(c.last_balance)}</span>
-                </span>
+                  <span className={cn("font-medium", selected ? "text-foreground" : "text-current")}>{c.name}</span>
+                  <span className={cn("tabular-nums", selected ? "text-muted-foreground" : "text-current")}>
+                    {money(c.last_balance)}
+                  </span>
+                </button>
               )
             })}
           </div>

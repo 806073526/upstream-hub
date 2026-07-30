@@ -3,6 +3,7 @@ import { BalanceOverview } from "@/components/monitor/balance-overview"
 import { MultiplierChanges } from "@/components/monitor/multiplier-changes"
 import { ChannelCards } from "@/components/monitor/channel-cards"
 import { BottomPanels } from "@/components/monitor/bottom-panels"
+import { UsageOverview } from "@/components/monitor/usage-overview"
 
 export default function Page() {
   return (
@@ -17,6 +18,8 @@ export default function Page() {
           <MultiplierChanges />
         </div>
       </div>
+
+      <UsageOverview />
 
       <ChannelCards />
 

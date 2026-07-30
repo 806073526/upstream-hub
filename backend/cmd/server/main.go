@@ -87,6 +87,7 @@ func main() {
 	captchas := storage.NewCaptchas(db)
 	notifies := storage.NewNotifications(db)
 	rates := storage.NewRates(db)
+	usage := storage.NewUsage(db)
 	monLogs := storage.NewMonitorLogs(db)
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, monLogs, cipher)
@@ -96,9 +97,9 @@ func main() {
 		BalanceLowCooldown: time.Duration(cfg.Notifications.BalanceLowCooldownMinutes) * time.Minute,
 		SendMaxAttempts:    cfg.Notifications.SendMaxAttempts,
 	})
-	monitorSvc := monitor.NewService(channels, rates, monLogs, channelSvc, dispatcher, log)
+	monitorSvc := monitor.NewService(channels, rates, usage, monLogs, channelSvc, dispatcher, log)
 
-	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, notifies, log)
+	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, usage, notifies, log)
 	if err := sch.Start(); err != nil {
 		log.Error("start scheduler failed", "err", err)
 		os.Exit(1)
@@ -131,6 +132,7 @@ func main() {
 		Captchas:   captchas,
 		Notifies:   notifies,
 		Rates:      rates,
+		Usage:      usage,
 		MonLogs:    monLogs,
 		ChannelSvc: channelSvc,
 		Monitor:    monitorSvc,

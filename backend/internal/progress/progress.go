@@ -18,6 +18,7 @@ const (
 	StageSession Stage = "session"
 	StageBalance Stage = "balance"
 	StageRates   Stage = "rates"
+	StageUsage   Stage = "usage"
 	StageDone    Stage = "done"
 	StageError   Stage = "error"
 )

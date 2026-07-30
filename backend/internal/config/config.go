@@ -74,6 +74,7 @@ type AuthConfig struct {
 type SchedulerConfig struct {
 	BalanceCron string          `mapstructure:"balanceCron"`
 	RateCron    string          `mapstructure:"rateCron"`
+	UsageCron   string          `mapstructure:"usageCron"`
 	Concurrency int             `mapstructure:"concurrency"`
 	Retention   RetentionConfig `mapstructure:"retention"`
 }
@@ -87,6 +88,8 @@ type RetentionConfig struct {
 	MonitorLogsDays      int    `mapstructure:"monitorLogsDays"`
 	BalanceSnapshotsDays int    `mapstructure:"balanceSnapshotsDays"`
 	NotificationLogsDays int    `mapstructure:"notificationLogsDays"`
+	UsageFiveMinuteHours int    `mapstructure:"usageFiveMinuteHours"`
+	UsageHourlyDays      int    `mapstructure:"usageHourlyDays"`
 }
 
 // NotificationsConfig 通知去抖策略。所有字段都是"少烦我"取向，默认不丢消息只合并。
@@ -182,6 +185,7 @@ func setDefaults(v *viper.Viper) {
 	// CLAUDE.md 默认建议：余额 15 分钟，倍率 30 分钟。
 	v.SetDefault("scheduler.balanceCron", "37 */15 * * * *")
 	v.SetDefault("scheduler.rateCron", "13 */30 * * * *")
+	v.SetDefault("scheduler.usageCron", "23 */5 * * * *")
 	v.SetDefault("scheduler.concurrency", 4)
 
 	// 历史清理：每天凌晨 3:17 跑一次（6 字段 cron 含秒），
@@ -190,6 +194,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.retention.monitorLogsDays", 30)
 	v.SetDefault("scheduler.retention.balanceSnapshotsDays", 90)
 	v.SetDefault("scheduler.retention.notificationLogsDays", 90)
+	v.SetDefault("scheduler.retention.usageFiveMinuteHours", 48)
+	v.SetDefault("scheduler.retention.usageHourlyDays", 90)
 
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.username", "admin")

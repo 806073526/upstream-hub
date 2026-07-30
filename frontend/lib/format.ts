@@ -44,10 +44,17 @@ export function money(value: number | null | undefined, opts?: { precise?: boole
   )
 }
 
-/** 把倍率渲染成"1.20 → 1.50"。 */
+const RATIO_DECIMAL_PLACES = 3
+
+/** 把倍率渲染成固定三位小数，避免丢失上游提供的精确倍率。 */
+export function formatRatio(value: number): string {
+  return value.toFixed(RATIO_DECIMAL_PLACES)
+}
+
+/** 把倍率渲染成"1.200 → 1.500"。 */
 export function ratioArrow(from: number | null | undefined, to: number) {
-  const f = from == null ? "—" : from.toFixed(2)
-  return `${f} → ${to.toFixed(2)}`
+  const f = from == null ? "—" : formatRatio(from)
+  return `${f} → ${formatRatio(to)}`
 }
 
 /** 计算变化方向 / 百分比文案，比如 "+25.0%"。 */

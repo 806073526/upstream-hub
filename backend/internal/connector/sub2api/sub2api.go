@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ type Client struct {
 
 func New() *Client {
 	c := resty.New().
-		SetTimeout(30 * time.Second).
+		SetTimeout(30*time.Second).
 		SetHeader("User-Agent", "upstream-hub/0.1").
 		SetHeader("Accept", "application/json")
 	return &Client{http: c}
@@ -134,8 +135,116 @@ func (c *Client) GetBalance(ctx context.Context, ch *connector.Channel, session 
 	}, nil
 }
 
+func (c *Client) GetUsage(ctx context.Context, ch *connector.Channel, session *connector.AuthSession, query connector.UsageQuery) (*connector.UsageResult, error) {
+	now := query.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+	location, err := time.LoadLocation(query.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api usage timezone: %w", err)
+	}
+	site := strings.TrimRight(ch.SiteURL, "/")
+
+	statsBody, err := c.getJSON(ctx, site+"/api/v1/usage/dashboard/stats", session)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api usage dashboard stats: %w", err)
+	}
+	var dashboard struct {
+		TotalActualCost float64  `json:"total_actual_cost"`
+		TodayActualCost *float64 `json:"today_actual_cost"`
+	}
+	if err := json.Unmarshal(statsBody, &dashboard); err != nil {
+		return nil, fmt.Errorf("sub2api usage dashboard stats decode: %w", err)
+	}
+	total := dashboard.TotalActualCost
+
+	todayQuery := url.Values{}
+	todayQuery.Set("period", "today")
+	todayQuery.Set("timezone", query.Timezone)
+	todayBody, err := c.getJSON(ctx, site+"/api/v1/usage/stats?"+todayQuery.Encode(), session)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api today usage: %w", err)
+	}
+	var todayStats struct {
+		TotalActualCost *float64 `json:"total_actual_cost"`
+		ActualCost      *float64 `json:"actual_cost"`
+	}
+	if err := json.Unmarshal(todayBody, &todayStats); err != nil {
+		return nil, fmt.Errorf("sub2api today usage decode: %w", err)
+	}
+	zeroToday := 0.0
+	today := &zeroToday
+	if todayStats.TotalActualCost != nil {
+		today = todayStats.TotalActualCost
+	} else if todayStats.ActualCost != nil {
+		today = todayStats.ActualCost
+	} else if dashboard.TodayActualCost != nil {
+		today = dashboard.TodayActualCost
+	}
+
+	historySince := query.HistorySince
+	if historySince.IsZero() {
+		historySince = now.Add(-30 * 24 * time.Hour)
+	}
+	trendQuery := url.Values{}
+	trendQuery.Set("start_date", historySince.In(location).Format("2006-01-02"))
+	trendQuery.Set("end_date", now.In(location).Format("2006-01-02"))
+	trendQuery.Set("granularity", "hour")
+	trendQuery.Set("timezone", query.Timezone)
+	trendBody, err := c.getJSON(ctx, site+"/api/v1/usage/dashboard/trend?"+trendQuery.Encode(), session)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api usage trend: %w", err)
+	}
+	var trend struct {
+		Trend []struct {
+			Date       string  `json:"date"`
+			ActualCost float64 `json:"actual_cost"`
+		} `json:"trend"`
+	}
+	if err := json.Unmarshal(trendBody, &trend); err != nil {
+		return nil, fmt.Errorf("sub2api usage trend decode: %w", err)
+	}
+
+	buckets := make([]connector.UsageBucketResult, 0, len(trend.Trend))
+	for _, point := range trend.Trend {
+		startAt, err := time.ParseInLocation("2006-01-02 15:04", point.Date, location)
+		if err != nil {
+			return nil, fmt.Errorf("sub2api usage trend date %q: %w", point.Date, err)
+		}
+		startAt = startAt.UTC()
+		endAt := startAt.Add(time.Hour)
+		buckets = append(buckets, connector.UsageBucketResult{
+			StartAt:           startAt,
+			EndAt:             endAt,
+			ResolutionSeconds: 3600,
+			Amount:            point.ActualCost,
+			Currency:          "USD",
+			Source:            "sub2api_trend",
+			Quality:           connector.UsageQualityExact,
+			Complete:          !endAt.After(now),
+		})
+	}
+
+	return &connector.UsageResult{
+		TotalAmount: &total,
+		TodayAmount: today,
+		Currency:    "USD",
+		ObservedAt:  now,
+		Buckets:     buckets,
+	}, nil
+}
+
 func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) ([]connector.RateResult, error) {
 	site := strings.TrimRight(ch.SiteURL, "/")
+	linkedGroups, err := c.getLinkedKeyGroups(ctx, site, session)
+	if err != nil {
+		return nil, err
+	}
+	if len(linkedGroups.names) == 0 && len(linkedGroups.ids) == 0 {
+		return []connector.RateResult{}, nil
+	}
 
 	availBody, err := c.getJSON(ctx, site+"/api/v1/groups/available", session)
 	if err != nil {
@@ -158,6 +267,11 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 
 	out := make([]connector.RateResult, 0, len(groups))
 	for _, g := range groups {
+		_, nameLinked := linkedGroups.names[g.Name]
+		_, idLinked := linkedGroups.ids[g.ID]
+		if !nameLinked && !idLinked {
+			continue
+		}
 		rate := g.RateMultiplier
 		if v, ok := overrides[strconv.FormatUint(g.ID, 10)]; ok {
 			rate = v
@@ -169,6 +283,139 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 		})
 	}
 	return out, nil
+}
+
+var keyListPaths = []string{
+	"/api/v1/keys?page=1&page_size=100",
+	"/api/v1/keys",
+	"/api/v1/api-keys?page=1&page_size=100",
+	"/api/v1/api-keys",
+	"/api/v1/user/api-keys",
+	"/api/v1/user/keys",
+	"/api/keys",
+}
+
+type linkedKeyGroups struct {
+	names map[string]struct{}
+	ids   map[uint64]struct{}
+}
+
+func (c *Client) getLinkedKeyGroups(ctx context.Context, site string, session *connector.AuthSession) (linkedKeyGroups, error) {
+	var lastErr error
+	for _, path := range keyListPaths {
+		body, err := c.getJSON(ctx, site+path, session)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		groups, err := decodeLinkedKeyGroups(body)
+		if err != nil {
+			return linkedKeyGroups{}, fmt.Errorf("sub2api keys decode: %w", err)
+		}
+		return groups, nil
+	}
+	return linkedKeyGroups{}, fmt.Errorf("sub2api keys: %w", lastErr)
+}
+
+func decodeLinkedKeyGroups(body []byte) (linkedKeyGroups, error) {
+	type keyItem struct {
+		Status    json.RawMessage `json:"status"`
+		Enabled   *bool           `json:"enabled"`
+		IsActive  *bool           `json:"is_active"`
+		Group     json.RawMessage `json:"group"`
+		GroupName string          `json:"group_name"`
+		GroupID   uint64          `json:"group_id"`
+	}
+
+	var items []keyItem
+	if strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
+		if err := json.Unmarshal(body, &items); err != nil {
+			return linkedKeyGroups{}, err
+		}
+	} else {
+		var page struct {
+			Items *[]keyItem      `json:"items"`
+			List  *[]keyItem      `json:"list"`
+			Keys  *[]keyItem      `json:"keys"`
+			Data  json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return linkedKeyGroups{}, err
+		}
+		switch {
+		case page.Items != nil:
+			items = *page.Items
+		case page.List != nil:
+			items = *page.List
+		case page.Keys != nil:
+			items = *page.Keys
+		case len(page.Data) > 0 && string(page.Data) != "null":
+			return decodeLinkedKeyGroups(page.Data)
+		default:
+			return linkedKeyGroups{}, errors.New("missing key items")
+		}
+	}
+
+	groups := linkedKeyGroups{
+		names: make(map[string]struct{}),
+		ids:   make(map[uint64]struct{}),
+	}
+	for _, item := range items {
+		if !activeKey(item.Status, item.Enabled, item.IsActive) {
+			continue
+		}
+		name := strings.TrimSpace(item.GroupName)
+		id := item.GroupID
+		if len(item.Group) > 0 && string(item.Group) != "null" {
+			var group struct {
+				ID   uint64 `json:"id"`
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(item.Group, &group); err == nil {
+				if id == 0 {
+					id = group.ID
+				}
+				if name == "" {
+					name = strings.TrimSpace(group.Name)
+				}
+			} else {
+				var groupName string
+				if stringErr := json.Unmarshal(item.Group, &groupName); stringErr == nil && name == "" {
+					name = strings.TrimSpace(groupName)
+				}
+			}
+		}
+		if name != "" {
+			groups.names[name] = struct{}{}
+		}
+		if id != 0 {
+			groups.ids[id] = struct{}{}
+		}
+	}
+	return groups, nil
+}
+
+func activeKey(status json.RawMessage, enabled, isActive *bool) bool {
+	if (enabled != nil && !*enabled) || (isActive != nil && !*isActive) {
+		return false
+	}
+	if len(status) == 0 || string(status) == "null" {
+		return true
+	}
+	var text string
+	if err := json.Unmarshal(status, &text); err == nil {
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case "disabled", "expired", "revoked", "inactive":
+			return false
+		default:
+			return true
+		}
+	}
+	var number int
+	if err := json.Unmarshal(status, &number); err == nil {
+		return number == 1
+	}
+	return true
 }
 
 func (c *Client) getJSON(ctx context.Context, url string, session *connector.AuthSession) ([]byte, error) {
@@ -183,11 +430,18 @@ func (c *Client) getJSON(ctx context.Context, url string, session *connector.Aut
 	if resp.IsError() {
 		return nil, connector.HTTPStatusError(resp.StatusCode(), resp.Body())
 	}
-	var wrapped sub2Resp
+	var wrapped struct {
+		Code    *int            `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
 	if err := json.Unmarshal(resp.Body(), &wrapped); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	if wrapped.Code != 0 {
+	if wrapped.Code == nil {
+		return resp.Body(), nil
+	}
+	if *wrapped.Code != 0 {
 		return nil, errors.New(wrapped.Message)
 	}
 	return wrapped.Data, nil

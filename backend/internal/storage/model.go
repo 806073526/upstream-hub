@@ -51,9 +51,13 @@ type Channel struct {
 	MonitorEnabled   bool           `gorm:"default:true" json:"monitor_enabled"`
 
 	// 最近一次采集结果（聚合视图，便于列表页直接展示）
-	LastBalance   *float64   `json:"last_balance,omitempty"`
-	LastBalanceAt *time.Time `json:"last_balance_at,omitempty"`
-	LastError     string     `gorm:"type:text" json:"last_error,omitempty"`
+	LastBalance    *float64   `json:"last_balance,omitempty"`
+	LastBalanceAt  *time.Time `json:"last_balance_at,omitempty"`
+	LastUsageTotal *float64   `gorm:"type:numeric(20,8)" json:"last_usage_total,omitempty"`
+	LastUsageToday *float64   `gorm:"type:numeric(20,8)" json:"last_usage_today,omitempty"`
+	UsageCurrency  string     `gorm:"size:16" json:"usage_currency,omitempty"`
+	LastUsageAt    *time.Time `json:"last_usage_at,omitempty"`
+	LastError      string     `gorm:"type:text" json:"last_error,omitempty"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
@@ -143,6 +147,23 @@ type BalanceSnapshot struct {
 
 func (BalanceSnapshot) TableName() string { return "balance_snapshots" }
 
+type UsageBucket struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	ChannelID         uint      `gorm:"not null;uniqueIndex:idx_usage_channel_start_resolution;index" json:"channel_id"`
+	BucketStart       time.Time `gorm:"not null;uniqueIndex:idx_usage_channel_start_resolution;index" json:"bucket_start"`
+	BucketEnd         time.Time `gorm:"not null" json:"bucket_end"`
+	ResolutionSeconds int       `gorm:"not null;uniqueIndex:idx_usage_channel_start_resolution" json:"resolution_seconds"`
+	Amount            float64   `gorm:"type:numeric(20,8);not null" json:"amount"`
+	Currency          string    `gorm:"size:16;not null;default:'USD'" json:"currency"`
+	Source            string    `gorm:"size:64;not null" json:"source"`
+	Quality           string    `gorm:"size:16;not null" json:"quality"`
+	Complete          bool      `gorm:"not null;default:true" json:"complete"`
+	CollectedAt       time.Time `gorm:"not null" json:"collected_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (UsageBucket) TableName() string { return "usage_buckets" }
+
 // NotificationChannelType 通知渠道类型。第一版至少 telegram，其它预留。
 type NotificationChannelType string
 
@@ -226,6 +247,7 @@ const (
 	MonitorJobLogin   MonitorJob = "login"
 	MonitorJobBalance MonitorJob = "balance"
 	MonitorJobRates   MonitorJob = "rates"
+	MonitorJobUsage   MonitorJob = "usage"
 )
 
 // MonitorLog 每次扫描 / 登录尝试的结果，便于诊断失败。

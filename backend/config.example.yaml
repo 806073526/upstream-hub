@@ -38,6 +38,8 @@ scheduler:
   balanceCron: "37 */15 * * * *"
   # 倍率监控：每 30 分钟。
   rateCron:    "13 */30 * * * *"
+  # 用量监控：每 5 分钟，保存累计/今日摘要及阶段用量。
+  usageCron:   "23 */5 * * * *"
   concurrency: 4
   # 历史数据清理。字段 = 0 表示该表不清理；cron 留空则不启动清理任务。
   # rate_change_logs 永远保留（核心业务数据，体积也小）。
@@ -46,6 +48,8 @@ scheduler:
     monitorLogsDays: 30           # 监控日志保留 30 天
     balanceSnapshotsDays: 90      # 余额采样保留 90 天
     notificationLogsDays: 90      # 通知发送日志保留 90 天
+    usageFiveMinuteHours: 48      # 5 分钟用量桶保留 48 小时
+    usageHourlyDays: 90           # 小时用量桶保留 90 天
 
 notifications:
   # 把一次扫描里多个分组的倍率变化合并成 1 条消息发，避免上游大调价瞬间刷屏。

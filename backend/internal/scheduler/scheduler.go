@@ -19,6 +19,7 @@ type Scheduler struct {
 	monitor  *monitor.Service
 	monLogs  *storage.MonitorLogs
 	rates    *storage.Rates
+	usage    *storage.Usage
 	notifies *storage.Notifications
 }
 
@@ -27,6 +28,7 @@ func New(
 	m *monitor.Service,
 	monLogs *storage.MonitorLogs,
 	rates *storage.Rates,
+	usage *storage.Usage,
 	notifies *storage.Notifications,
 	log *slog.Logger,
 ) *Scheduler {
@@ -37,6 +39,7 @@ func New(
 		monitor:  m,
 		monLogs:  monLogs,
 		rates:    rates,
+		usage:    usage,
 		notifies: notifies,
 	}
 }
@@ -52,6 +55,11 @@ func (s *Scheduler) Start() error {
 			return err
 		}
 	}
+	if s.cfg.UsageCron != "" {
+		if _, err := s.cron.AddFunc(s.cfg.UsageCron, s.runUsage); err != nil {
+			return err
+		}
+	}
 	if s.cfg.Retention.Cron != "" && s.hasRetention() {
 		if _, err := s.cron.AddFunc(s.cfg.Retention.Cron, s.runRetention); err != nil {
 			return err
@@ -61,6 +69,7 @@ func (s *Scheduler) Start() error {
 	s.log.Info("scheduler started",
 		"balanceCron", s.cfg.BalanceCron,
 		"rateCron", s.cfg.RateCron,
+		"usageCron", s.cfg.UsageCron,
 		"retentionCron", s.cfg.Retention.Cron,
 		"concurrency", s.cfg.Concurrency,
 	)
@@ -85,9 +94,16 @@ func (s *Scheduler) runRates() {
 	s.monitor.ScanAllRates(ctx)
 }
 
+func (s *Scheduler) runUsage() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	s.monitor.ScanAllUsage(ctx)
+}
+
 func (s *Scheduler) hasRetention() bool {
 	r := s.cfg.Retention
-	return r.MonitorLogsDays > 0 || r.BalanceSnapshotsDays > 0 || r.NotificationLogsDays > 0
+	return r.MonitorLogsDays > 0 || r.BalanceSnapshotsDays > 0 || r.NotificationLogsDays > 0 ||
+		r.UsageFiveMinuteHours > 0 || r.UsageHourlyDays > 0
 }
 
 // runRetention 按配置删除过期历史。任一表失败不影响其它，全部错误写日志。
@@ -122,6 +138,25 @@ func (s *Scheduler) runRetention() {
 			s.log.Warn("retention notification_logs failed", "err", err)
 		} else if n > 0 {
 			s.log.Info("retention notification_logs deleted", "rows", n, "before", cutoff)
+		}
+	}
+
+	if r.UsageFiveMinuteHours > 0 {
+		cutoff := now.Add(-time.Duration(r.UsageFiveMinuteHours) * time.Hour)
+		n, err := s.usage.DeleteBefore(300, cutoff)
+		if err != nil {
+			s.log.Warn("retention five-minute usage failed", "err", err)
+		} else if n > 0 {
+			s.log.Info("retention five-minute usage deleted", "rows", n, "before", cutoff)
+		}
+	}
+	if r.UsageHourlyDays > 0 {
+		cutoff := now.AddDate(0, 0, -r.UsageHourlyDays)
+		n, err := s.usage.DeleteBefore(3600, cutoff)
+		if err != nil {
+			s.log.Warn("retention hourly usage failed", "err", err)
+		} else if n > 0 {
+			s.log.Info("retention hourly usage deleted", "rows", n, "before", cutoff)
 		}
 	}
 }

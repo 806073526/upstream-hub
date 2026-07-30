@@ -62,6 +62,38 @@ type RateResult struct {
 	CompletionRatio float64
 }
 
+type UsageQuality string
+
+const (
+	UsageQualityExact    UsageQuality = "exact"
+	UsageQualityObserved UsageQuality = "observed"
+)
+
+type UsageQuery struct {
+	Now          time.Time
+	Timezone     string
+	HistorySince time.Time
+}
+
+type UsageBucketResult struct {
+	StartAt           time.Time
+	EndAt             time.Time
+	ResolutionSeconds int
+	Amount            float64
+	Currency          string
+	Source            string
+	Quality           UsageQuality
+	Complete          bool
+}
+
+type UsageResult struct {
+	TotalAmount *float64
+	TodayAmount *float64
+	Currency    string
+	ObservedAt  time.Time
+	Buckets     []UsageBucketResult
+}
+
 // Connector 上游连接器统一接口。
 //
 //   - GetTurnstileSiteKey  从上游公开接口读取 Turnstile site key（无需鉴权）
@@ -78,6 +110,7 @@ type Connector interface {
 	CheckAuth(ctx context.Context, channel *Channel, session *AuthSession) error
 	GetBalance(ctx context.Context, channel *Channel, session *AuthSession) (*BalanceResult, error)
 	GetRates(ctx context.Context, channel *Channel, session *AuthSession) ([]RateResult, error)
+	GetUsage(ctx context.Context, channel *Channel, session *AuthSession, query UsageQuery) (*UsageResult, error)
 }
 
 // Factory 构造一个全新的 Connector 实例。
