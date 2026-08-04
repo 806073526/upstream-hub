@@ -19,6 +19,7 @@ func TestGetRatesReturnsOnlyGroupsLinkedToActiveKeys(t *testing.T) {
 				"items": []map[string]any{
 					{
 						"name":   "active-key",
+						"key":    "sk-active-key",
 						"status": "active",
 						"group":  map[string]any{"id": 2, "name": "linked"},
 					},
@@ -67,6 +68,12 @@ func TestGetRatesReturnsOnlyGroupsLinkedToActiveKeys(t *testing.T) {
 	}
 	if rates[0].ModelName != "linked" || rates[0].Ratio != 0.8 {
 		t.Fatalf("GetRates returned unexpected group: %#v", rates[0])
+	}
+	if len(rates[0].Keys) != 1 || rates[0].Keys[0].Fingerprint == "" {
+		t.Fatalf("GetRates did not return the active key identity: %#v", rates[0].Keys)
+	}
+	if rates[0].Keys[0].Name != "active-key" {
+		t.Fatalf("GetRates returned incomplete key identity: %#v", rates[0].Keys[0])
 	}
 }
 

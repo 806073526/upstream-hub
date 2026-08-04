@@ -33,6 +33,11 @@ type rateSnapshotStore interface {
 	DeleteExcept(channelID uint, modelNames []string) error
 }
 
+type RateScan struct {
+	Channel storage.Channel
+	Results []connector.RateResult
+}
+
 func NewService(
 	channels *storage.Channels,
 	rates *storage.Rates,
@@ -172,17 +177,26 @@ func (s *Service) ScanAllBalances(ctx context.Context) {
 
 // ScanAllRates 扫描所有启用监控的渠道倍率。
 func (s *Service) ScanAllRates(ctx context.Context) {
+	_ = s.ScanAllRatesWithResults(ctx)
+}
+
+func (s *Service) ScanAllRatesWithResults(ctx context.Context) []RateScan {
 	list, err := s.channels.ListMonitorEnabled()
 	if err != nil {
 		s.log.Error("list channels", "err", err)
-		return
+		return nil
 	}
+	scans := make([]RateScan, 0, len(list))
 	for i := range list {
 		c := list[i]
-		if err := s.RefreshRates(ctx, &c); err != nil {
+		results, err := s.RefreshRatesWithResults(ctx, &c)
+		if err != nil {
 			s.log.Warn("refresh rates failed", "channel", c.Name, "err", err)
+			continue
 		}
+		scans = append(scans, RateScan{Channel: c, Results: results})
 	}
+	return scans
 }
 
 // RefreshBalance 单个渠道余额刷新，可被 API 手动触发。
@@ -240,10 +254,15 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 
 // RefreshRates 单个渠道倍率刷新，可被 API 手动触发。
 func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
+	_, err := s.RefreshRatesWithResults(ctx, c)
+	return err
+}
+
+func (s *Service) RefreshRatesWithResults(ctx context.Context, c *storage.Channel) ([]connector.RateResult, error) {
 	resolved, conn, session, err := s.prepare(ctx, c)
 	if err != nil {
 		s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
-		return err
+		return nil, err
 	}
 
 	progress.Start(ctx, progress.StageRates, "拉取分组倍率…")
@@ -261,14 +280,14 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 	if err != nil {
 		progress.Fail(ctx, progress.StageRates, err.Error())
 		s.notifyError(ctx, c, storage.EventMonitorFailed, "倍率采集失败", err)
-		return err
+		return nil, err
 	}
 
 	now := time.Now()
 	changes, err := reconcileRates(s.rates, c.ID, results, now)
 	if err != nil {
 		progress.Fail(ctx, progress.StageRates, err.Error())
-		return err
+		return nil, err
 	}
 	// 一次扫描的所有变化打包推送：去抖策略（合并 / 涨跌幅过滤）由 Dispatcher.Policy 决定。
 	if len(changes) > 0 {
@@ -276,7 +295,7 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 	}
 	progress.OK(ctx, progress.StageRates, fmt.Sprintf("拉到 %d 个分组", len(results)),
 		map[string]any{"count": len(results)})
-	return nil
+	return results, nil
 }
 
 func reconcileRates(store rateSnapshotStore, channelID uint, results []connector.RateResult, now time.Time) ([]notify.RateChange, error) {

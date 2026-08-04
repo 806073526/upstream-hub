@@ -19,11 +19,16 @@ func TestGetRatesReturnsOnlyGroupsLinkedToActiveTokens(t *testing.T) {
 				"success": true,
 				"data": map[string]any{
 					"items": []map[string]any{
-						{"name": "active-key", "group": "linked", "status": 1},
+						{"id": 7, "name": "active-key", "group": "linked", "status": 1},
 						{"name": "invalid-key", "group": "invalid", "status": 0},
 						{"name": "disabled-key", "group": "disabled", "status": 2},
 					},
 				},
+			})
+		case "/api/token/batch/keys":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"keys": map[string]string{"7": "sk-active-key"}},
 			})
 		case "/api/user/self/groups":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -53,6 +58,12 @@ func TestGetRatesReturnsOnlyGroupsLinkedToActiveTokens(t *testing.T) {
 	}
 	if rates[0].ModelName != "linked" || rates[0].Ratio != 0.5 {
 		t.Fatalf("GetRates returned unexpected group: %#v", rates[0])
+	}
+	if len(rates[0].Keys) != 1 || rates[0].Keys[0].Fingerprint == "" {
+		t.Fatalf("GetRates did not return the active key identity: %#v", rates[0].Keys)
+	}
+	if rates[0].Keys[0].Name != "active-key" || rates[0].Keys[0].TokenID != "7" {
+		t.Fatalf("GetRates returned incomplete key identity: %#v", rates[0].Keys[0])
 	}
 }
 

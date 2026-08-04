@@ -280,6 +280,7 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 			ModelName:   g.Name,
 			Description: g.Description,
 			Ratio:       rate,
+			Keys:        linkedGroups.identitiesFor(g.Name, g.ID),
 		})
 	}
 	return out, nil
@@ -296,8 +297,17 @@ var keyListPaths = []string{
 }
 
 type linkedKeyGroups struct {
-	names map[string]struct{}
-	ids   map[uint64]struct{}
+	names       map[string]struct{}
+	ids         map[uint64]struct{}
+	identities  map[string][]connector.KeyIdentity
+	identityIDs map[uint64][]connector.KeyIdentity
+}
+
+func (g linkedKeyGroups) identitiesFor(name string, id uint64) []connector.KeyIdentity {
+	if values := g.identities[name]; len(values) > 0 {
+		return values
+	}
+	return g.identityIDs[id]
 }
 
 func (c *Client) getLinkedKeyGroups(ctx context.Context, site string, session *connector.AuthSession) (linkedKeyGroups, error) {
@@ -319,6 +329,9 @@ func (c *Client) getLinkedKeyGroups(ctx context.Context, site string, session *c
 
 func decodeLinkedKeyGroups(body []byte) (linkedKeyGroups, error) {
 	type keyItem struct {
+		ID        json.RawMessage `json:"id"`
+		Name      string          `json:"name"`
+		Key       string          `json:"key"`
 		Status    json.RawMessage `json:"status"`
 		Enabled   *bool           `json:"enabled"`
 		IsActive  *bool           `json:"is_active"`
@@ -357,8 +370,10 @@ func decodeLinkedKeyGroups(body []byte) (linkedKeyGroups, error) {
 	}
 
 	groups := linkedKeyGroups{
-		names: make(map[string]struct{}),
-		ids:   make(map[uint64]struct{}),
+		names:       make(map[string]struct{}),
+		ids:         make(map[uint64]struct{}),
+		identities:  make(map[string][]connector.KeyIdentity),
+		identityIDs: make(map[uint64][]connector.KeyIdentity),
 	}
 	for _, item := range items {
 		if !activeKey(item.Status, item.Enabled, item.IsActive) {
@@ -390,6 +405,28 @@ func decodeLinkedKeyGroups(body []byte) (linkedKeyGroups, error) {
 		}
 		if id != 0 {
 			groups.ids[id] = struct{}{}
+		}
+		identity := connector.KeyIdentity{Name: strings.TrimSpace(item.Name)}
+		if len(item.ID) > 0 && string(item.ID) != "null" {
+			var numeric uint64
+			if json.Unmarshal(item.ID, &numeric) == nil && numeric != 0 {
+				identity.TokenID = strconv.FormatUint(numeric, 10)
+			}
+			if identity.TokenID == "" {
+				var text string
+				if json.Unmarshal(item.ID, &text) == nil {
+					identity.TokenID = strings.TrimSpace(text)
+				}
+			}
+		}
+		if strings.TrimSpace(item.Key) != "" {
+			identity.Fingerprint = connector.KeyFingerprint(item.Key)
+		}
+		if name != "" {
+			groups.identities[name] = append(groups.identities[name], identity)
+		}
+		if id != 0 {
+			groups.identityIDs[id] = append(groups.identityIDs[id], identity)
 		}
 	}
 	return groups, nil

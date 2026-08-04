@@ -63,6 +63,21 @@ notifications:
   # 退避：1s / 2s / 4s … 上限 30s。
   sendMaxAttempts: 3
 
+integration:
+  newapi:
+    enabled: false
+    baseURL: "http://localhost:3000"
+    # Same value as UPSTREAM_HUB_API_TOKEN in new-api.
+    apiToken: ""
+    timeoutSeconds: 15
+    # Keep false to only display metrics. Enable explicitly after observing data.
+    autoPriority: false
+    basePriority: 500
+    priorityStep: 10
+    priorityBucketWidth: 0
+    priorityMaxAgeHours: 48
+    excludedChannelIDs: []
+
 log:
   level: info          # debug | info | warn | error
   format: text         # text | json

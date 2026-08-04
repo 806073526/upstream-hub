@@ -60,6 +60,13 @@ type RateResult struct {
 	Description     string
 	Ratio           float64
 	CompletionRatio float64
+	Keys            []KeyIdentity
+}
+
+type KeyIdentity struct {
+	Fingerprint string
+	TokenID     string
+	Name        string
 }
 
 type UsageQuality string

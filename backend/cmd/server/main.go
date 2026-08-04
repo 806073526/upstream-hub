@@ -18,6 +18,7 @@ import (
 	"github.com/worryzyy/upstream-hub/internal/channel"
 	"github.com/worryzyy/upstream-hub/internal/config"
 	"github.com/worryzyy/upstream-hub/internal/crypto"
+	newapiintegration "github.com/worryzyy/upstream-hub/internal/integration/newapi"
 	"github.com/worryzyy/upstream-hub/internal/logger"
 	"github.com/worryzyy/upstream-hub/internal/monitor"
 	"github.com/worryzyy/upstream-hub/internal/notify"
@@ -100,6 +101,15 @@ func main() {
 	monitorSvc := monitor.NewService(channels, rates, usage, monLogs, channelSvc, dispatcher, log)
 
 	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, usage, notifies, log)
+	if cfg.Integration.NewAPI.Enabled {
+		client := newapiintegration.NewClient(
+			cfg.Integration.NewAPI.BaseURL,
+			cfg.Integration.NewAPI.APIToken,
+			time.Duration(cfg.Integration.NewAPI.TimeoutSeconds)*time.Second,
+		)
+		sch.SetNewAPIIntegration(client, cfg.Integration.NewAPI)
+		log.Info("new-api integration enabled", "baseURL", cfg.Integration.NewAPI.BaseURL, "autoPriority", cfg.Integration.NewAPI.AutoPriority)
+	}
 	if err := sch.Start(); err != nil {
 		log.Error("start scheduler failed", "err", err)
 		os.Exit(1)

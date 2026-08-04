@@ -301,12 +301,29 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 	if err != nil {
 		return nil, fmt.Errorf("newapi tokens: %w", err)
 	}
-	linkedGroups, err := decodeLinkedTokenGroups(tokenBody)
+	linkedTokens, err := decodeActiveTokens(tokenBody)
 	if err != nil {
 		return nil, fmt.Errorf("newapi tokens decode: %w", err)
 	}
-	if len(linkedGroups) == 0 {
+	if len(linkedTokens) == 0 {
 		return []connector.RateResult{}, nil
+	}
+	keys, err := c.getTokenKeys(ctx, site, session, linkedTokens)
+	if err != nil {
+		// Older NewAPI deployments may not expose the batch key endpoint. Keep
+		// collecting ratios in that case; identities simply remain unmatched.
+		keys = map[int64]string{}
+	}
+	linkedGroups := make(map[string][]connector.KeyIdentity)
+	for _, token := range linkedTokens {
+		identity := connector.KeyIdentity{Name: token.Name}
+		if token.ID > 0 {
+			identity.TokenID = strconv.FormatInt(token.ID, 10)
+		}
+		if key := keys[token.ID]; key != "" {
+			identity.Fingerprint = connector.KeyFingerprint(key)
+		}
+		linkedGroups[token.Group] = append(linkedGroups[token.Group], identity)
 	}
 
 	body, err := c.getJSON(ctx, site+"/api/user/self/groups", session)
@@ -323,7 +340,8 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 	}
 	out := make([]connector.RateResult, 0, len(raw))
 	for name, v := range raw {
-		if _, ok := linkedGroups[name]; !ok {
+		identities, ok := linkedGroups[name]
+		if !ok {
 			continue
 		}
 		var ratio float64
@@ -335,25 +353,28 @@ func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *c
 			ModelName:   name,
 			Description: v.Desc,
 			Ratio:       ratio,
+			Keys:        identities,
 		})
 	}
 	return out, nil
 }
 
-func decodeLinkedTokenGroups(body []byte) (map[string]struct{}, error) {
-	type token struct {
-		Group  string `json:"group"`
-		Status *int   `json:"status"`
-	}
+type activeToken struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Group  string `json:"group"`
+	Status *int   `json:"status"`
+}
 
-	var items []token
+func decodeActiveTokens(body []byte) ([]activeToken, error) {
+	var items []activeToken
 	if strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
 		if err := json.Unmarshal(body, &items); err != nil {
 			return nil, err
 		}
 	} else {
 		var page struct {
-			Items *[]token `json:"items"`
+			Items *[]activeToken `json:"items"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, err
@@ -363,14 +384,55 @@ func decodeLinkedTokenGroups(body []byte) (map[string]struct{}, error) {
 		}
 		items = *page.Items
 	}
-
-	groups := make(map[string]struct{})
+	active := make([]activeToken, 0, len(items))
 	for _, item := range items {
-		group := strings.TrimSpace(item.Group)
-		if group == "" || (item.Status != nil && *item.Status != 1) {
+		item.Group = strings.TrimSpace(item.Group)
+		if item.Group == "" || (item.Status != nil && *item.Status != 1) {
 			continue
 		}
-		groups[group] = struct{}{}
+		active = append(active, item)
+	}
+	return active, nil
+}
+
+func (c *Client) getTokenKeys(ctx context.Context, site string, session *connector.AuthSession, tokens []activeToken) (map[int64]string, error) {
+	ids := make([]int64, 0, len(tokens))
+	for _, token := range tokens {
+		if token.ID > 0 {
+			ids = append(ids, token.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return map[int64]string{}, nil
+	}
+	body, err := c.postJSON(ctx, site+"/api/token/batch/keys", session, map[string]any{"ids": ids})
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Keys map[string]string `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+	result := make(map[int64]string, len(data.Keys))
+	for id, key := range data.Keys {
+		parsed, err := strconv.ParseInt(id, 10, 64)
+		if err == nil {
+			result[parsed] = key
+		}
+	}
+	return result, nil
+}
+
+func decodeLinkedTokenGroups(body []byte) (map[string]struct{}, error) {
+	groups := make(map[string]struct{})
+	items, err := decodeActiveTokens(body)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		groups[item.Group] = struct{}{}
 	}
 	return groups, nil
 }
@@ -387,6 +449,33 @@ func (c *Client) getJSON(ctx context.Context, url string, session *connector.Aut
 		}
 	}
 	resp, err := req.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.IsError() {
+		return nil, connector.HTTPStatusError(resp.StatusCode(), resp.Body())
+	}
+	var wrapped newapiResp
+	if err := json.Unmarshal(resp.Body(), &wrapped); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	if !wrapped.Success {
+		return nil, errors.New(wrapped.Message)
+	}
+	return wrapped.Data, nil
+}
+
+func (c *Client) postJSON(ctx context.Context, url string, session *connector.AuthSession, payload any) ([]byte, error) {
+	req := c.http.R().SetContext(ctx).SetHeader("Content-Type", "application/json").SetBody(payload)
+	if session != nil {
+		if session.Cookie != "" {
+			req.SetHeader("Cookie", session.Cookie)
+		}
+		if session.UserID != "" {
+			req.SetHeader("New-Api-User", session.UserID)
+		}
+	}
+	resp, err := req.Post(url)
 	if err != nil {
 		return nil, err
 	}

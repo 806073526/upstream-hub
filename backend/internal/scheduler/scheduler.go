@@ -8,19 +8,28 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/worryzyy/upstream-hub/internal/config"
+	newapiintegration "github.com/worryzyy/upstream-hub/internal/integration/newapi"
 	"github.com/worryzyy/upstream-hub/internal/monitor"
+	"github.com/worryzyy/upstream-hub/internal/priority"
 	"github.com/worryzyy/upstream-hub/internal/storage"
 )
 
 type Scheduler struct {
-	cfg      config.SchedulerConfig
-	log      *slog.Logger
-	cron     *cron.Cron
-	monitor  *monitor.Service
-	monLogs  *storage.MonitorLogs
-	rates    *storage.Rates
-	usage    *storage.Usage
-	notifies *storage.Notifications
+	cfg       config.SchedulerConfig
+	log       *slog.Logger
+	cron      *cron.Cron
+	monitor   *monitor.Service
+	monLogs   *storage.MonitorLogs
+	rates     *storage.Rates
+	usage     *storage.Usage
+	notifies  *storage.Notifications
+	newAPI    *newapiintegration.Client
+	newAPICfg config.NewAPIIntegrationConfig
+}
+
+func (s *Scheduler) SetNewAPIIntegration(client *newapiintegration.Client, cfg config.NewAPIIntegrationConfig) {
+	s.newAPI = client
+	s.newAPICfg = cfg
 }
 
 func New(
@@ -73,6 +82,9 @@ func (s *Scheduler) Start() error {
 		"retentionCron", s.cfg.Retention.Cron,
 		"concurrency", s.cfg.Concurrency,
 	)
+	if s.newAPI != nil {
+		go s.runRates()
+	}
 	return nil
 }
 
@@ -91,7 +103,79 @@ func (s *Scheduler) runBalance() {
 func (s *Scheduler) runRates() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	s.monitor.ScanAllRates(ctx)
+	scans := s.monitor.ScanAllRatesWithResults(ctx)
+	if s.newAPI == nil || len(scans) == 0 {
+		return
+	}
+	identities, err := s.newAPI.FetchIdentities(ctx)
+	if err != nil {
+		s.log.Warn("new-api identities sync failed", "err", err)
+		return
+	}
+	converted := make([]newapiintegration.Scan, 0, len(scans))
+	for _, scan := range scans {
+		converted = append(converted, newapiintegration.Scan{
+			ChannelID: scan.Channel.ID,
+			SiteURL:   scan.Channel.SiteURL,
+			Balance:   scan.Channel.LastBalance,
+			BalanceAt: derefTime(scan.Channel.LastBalanceAt),
+			Results:   scan.Results,
+		})
+	}
+	metrics := newapiintegration.BuildMatchedMetrics(identities, converted, time.Now())
+	if err := s.newAPI.PushMetrics(ctx, metrics); err != nil {
+		s.log.Warn("new-api metrics sync failed", "err", err)
+	}
+	if !s.newAPICfg.AutoPriority {
+		return
+	}
+	updates := s.buildPriorityUpdates(identities, metrics)
+	if err := s.newAPI.ApplyPriorities(ctx, updates); err != nil {
+		s.log.Warn("new-api priority sync failed", "err", err)
+	}
+}
+
+func derefTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
+}
+
+func (s *Scheduler) buildPriorityUpdates(identities []newapiintegration.Identity, metrics []newapiintegration.Metric) []priority.PriorityUpdate {
+	excluded := make(map[uint]struct{}, len(s.newAPICfg.ExcludedChannelIDs))
+	for _, id := range s.newAPICfg.ExcludedChannelIDs {
+		excluded[id] = struct{}{}
+	}
+	current := make(map[int]int64, len(identities))
+	for _, identity := range identities {
+		current[identity.ChannelID] = identity.Priority
+	}
+	byChannel := make(map[int]priority.Candidate)
+	for _, metric := range metrics {
+		candidate, exists := byChannel[metric.ChannelID]
+		observedAt := time.Unix(metric.RatioAt, 0)
+		if !exists || metric.Ratio < candidate.Ratio {
+			candidate = priority.Candidate{
+				ChannelID: metric.ChannelID, Ratio: metric.Ratio, ObservedAt: observedAt,
+				CurrentPriority: current[metric.ChannelID],
+			}
+		}
+		if _, ok := excluded[uint(metric.ChannelID)]; ok {
+			candidate.Excluded = true
+		}
+		byChannel[metric.ChannelID] = candidate
+	}
+	candidates := make([]priority.Candidate, 0, len(byChannel))
+	for _, candidate := range byChannel {
+		candidates = append(candidates, candidate)
+	}
+	return priority.BuildPriorityUpdates(candidates, priority.Options{
+		BasePriority: s.newAPICfg.BasePriority,
+		Step:         s.newAPICfg.PriorityStep,
+		BucketWidth:  s.newAPICfg.PriorityBucketWidth,
+		MaxAge:       time.Duration(s.newAPICfg.PriorityMaxAgeHours) * time.Hour,
+	})
 }
 
 func (s *Scheduler) runUsage() {

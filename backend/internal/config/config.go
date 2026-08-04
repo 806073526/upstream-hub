@@ -15,6 +15,7 @@ type Config struct {
 	Auth          AuthConfig          `mapstructure:"auth"`
 	Scheduler     SchedulerConfig     `mapstructure:"scheduler"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
+	Integration   IntegrationConfig   `mapstructure:"integration"`
 	Log           LogConfig           `mapstructure:"log"`
 }
 
@@ -115,6 +116,23 @@ type LogConfig struct {
 	Format string `mapstructure:"format"`
 }
 
+type IntegrationConfig struct {
+	NewAPI NewAPIIntegrationConfig `mapstructure:"newapi"`
+}
+
+type NewAPIIntegrationConfig struct {
+	Enabled             bool    `mapstructure:"enabled"`
+	BaseURL             string  `mapstructure:"baseURL"`
+	APIToken            string  `mapstructure:"apiToken"`
+	TimeoutSeconds      int     `mapstructure:"timeoutSeconds"`
+	AutoPriority        bool    `mapstructure:"autoPriority"`
+	BasePriority        int64   `mapstructure:"basePriority"`
+	PriorityStep        int64   `mapstructure:"priorityStep"`
+	PriorityBucketWidth float64 `mapstructure:"priorityBucketWidth"`
+	PriorityMaxAgeHours int     `mapstructure:"priorityMaxAgeHours"`
+	ExcludedChannelIDs  []uint  `mapstructure:"excludedChannelIDs"`
+}
+
 // Load 读取 config.yaml（可选）+ APP_SECRET / UPSTREAMHUB_* 环境变量覆盖。
 //
 // 关键映射：
@@ -156,6 +174,8 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("database.password", "UPSTREAMHUB_DATABASE_PASSWORD")
 	_ = v.BindEnv("database.name", "UPSTREAMHUB_DATABASE_NAME")
 	_ = v.BindEnv("database.sslMode", "UPSTREAMHUB_DATABASE_SSLMODE")
+	_ = v.BindEnv("integration.newapi.baseURL", "UPSTREAMHUB_NEWAPI_BASE_URL")
+	_ = v.BindEnv("integration.newapi.apiToken", "UPSTREAM_HUB_API_TOKEN")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -208,6 +228,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.minChangePct", 0)
 	v.SetDefault("notifications.balanceLowCooldownMinutes", 60)
 	v.SetDefault("notifications.sendMaxAttempts", 3)
+	v.SetDefault("integration.newapi.enabled", false)
+	v.SetDefault("integration.newapi.timeoutSeconds", 15)
+	v.SetDefault("integration.newapi.autoPriority", false)
+	v.SetDefault("integration.newapi.basePriority", int64(500))
+	v.SetDefault("integration.newapi.priorityStep", int64(10))
+	v.SetDefault("integration.newapi.priorityBucketWidth", 0)
+	v.SetDefault("integration.newapi.priorityMaxAgeHours", 48)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")
