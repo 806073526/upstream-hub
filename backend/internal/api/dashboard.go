@@ -53,6 +53,19 @@ type dashboardChannelStat struct {
 	LastError      string   `json:"last_error,omitempty"`
 }
 
+func sumChannelUsage(channels []storage.Channel) (float64, bool) {
+	var total float64
+	hasData := false
+	for _, channel := range channels {
+		if channel.LastUsageTotal == nil {
+			continue
+		}
+		total += *channel.LastUsageTotal
+		hasData = true
+	}
+	return total, hasData
+}
+
 func dashboardSummary(c *gin.Context, d *Deps) {
 	channels, err := d.Channels.List()
 	if err != nil {
@@ -62,6 +75,7 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 
 	stats := make([]dashboardChannelStat, 0, len(channels))
 	var totalBalance float64
+	totalUsage, _ := sumChannelUsage(channels)
 	var lowest *dashboardLowest
 	var activeCount, failedCount int
 
@@ -106,6 +120,7 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 			"active_channels":          activeCount,
 			"failed_channels":          failedCount,
 			"total_balance":            totalBalance,
+			"total_usage":              totalUsage,
 			"lowest_balance":           lowest,
 			"channels":                 stats,
 			"recent_rate_changes":      recentChanges,

@@ -49,7 +49,7 @@ scheduler:
     balanceSnapshotsDays: 90      # 余额采样保留 90 天
     notificationLogsDays: 90      # 通知发送日志保留 90 天
     usageFiveMinuteHours: 48      # 5 分钟用量桶保留 48 小时
-    usageHourlyDays: 90           # 小时用量桶保留 90 天
+    usageHourlyDays: 400          # 小时用量桶保留约 13 个月，支持半年/一年按月统计
 
 notifications:
   # 把一次扫描里多个分组的倍率变化合并成 1 条消息发，避免上游大调价瞬间刷屏。

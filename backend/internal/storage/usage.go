@@ -97,6 +97,8 @@ type UsageTrendSpec struct {
 	OutputResolutionSeconds int
 }
 
+const usageMonthResolutionSeconds = 2592000
+
 type UsageTrendPoint struct {
 	StartAt           time.Time        `json:"start_at"`
 	EndAt             time.Time        `json:"end_at"`
@@ -141,6 +143,17 @@ func ResolveUsageTrendSpec(rangeID string, now time.Time, location *time.Locatio
 		spec.StartAt = todayStart.AddDate(0, 0, -29).UTC()
 		spec.SourceResolutionSeconds = 3600
 		spec.OutputResolutionSeconds = 86400
+	case "6m", "1y":
+		localNow := now.In(location)
+		currentMonthStart := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+		months := 6
+		if rangeID == "1y" {
+			months = 12
+		}
+		spec.StartAt = currentMonthStart.AddDate(0, -(months - 1), 0).UTC()
+		spec.EndAt = currentMonthStart.AddDate(0, 1, 0).UTC()
+		spec.SourceResolutionSeconds = 3600
+		spec.OutputResolutionSeconds = usageMonthResolutionSeconds
 	default:
 		return UsageTrendSpec{}, errors.New("unsupported usage trend range")
 	}
@@ -264,6 +277,10 @@ func AggregateUsageBuckets(buckets []UsageBucket, spec UsageTrendSpec, location 
 }
 
 func usageOutputBucketStart(at time.Time, seconds int, location *time.Location) time.Time {
+	if seconds == usageMonthResolutionSeconds {
+		local := at.In(location)
+		return time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, location).UTC()
+	}
 	if seconds == 86400 {
 		local := at.In(location)
 		return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location).UTC()
@@ -272,6 +289,9 @@ func usageOutputBucketStart(at time.Time, seconds int, location *time.Location) 
 }
 
 func usageOutputBucketEnd(start time.Time, seconds int, location *time.Location) time.Time {
+	if seconds == usageMonthResolutionSeconds {
+		return start.In(location).AddDate(0, 1, 0).UTC()
+	}
 	if seconds == 86400 {
 		return start.In(location).AddDate(0, 0, 1).UTC()
 	}

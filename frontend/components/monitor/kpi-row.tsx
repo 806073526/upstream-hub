@@ -1,6 +1,6 @@
 "use client"
 
-import { ArrowUpRight, DollarSign, MessageSquare } from "lucide-react"
+import { ArrowUpRight, DollarSign, MessageSquare, TrendingUp } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { useDashboardSummary, useRateChanges } from "@/lib/queries"
@@ -32,6 +32,7 @@ export function KpiRow() {
   const active = data?.active_channels ?? 0
   const failed = data?.failed_channels ?? 0
   const totalBalance = data?.total_balance ?? 0
+  const totalUsage = data?.total_usage ?? 0
   const lowest = data?.lowest_balance ?? null
 
   const todayChangeCount = countTodayChanges(recentChanges.data ?? [])
@@ -53,6 +54,14 @@ export function KpiRow() {
       ) : (
         <span className="text-muted-foreground">{"—"}</span>
       ),
+    },
+    {
+      label: "总用量",
+      value: money(totalUsage),
+      icon: TrendingUp,
+      iconBg: "bg-warning/10",
+      iconColor: "text-warning",
+      footer: <span className="text-muted-foreground">{"所有渠道累计"}</span>,
     },
     {
       label: "渠道状态",
@@ -97,7 +106,7 @@ export function KpiRow() {
   ]
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {kpis.map((k) => (
         <Card
           key={k.label}

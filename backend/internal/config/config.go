@@ -189,13 +189,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.concurrency", 4)
 
 	// 历史清理：每天凌晨 3:17 跑一次（6 字段 cron 含秒），
-	// monitor 30 天 / balance 90 天 / notify 90 天。rate_change_logs 不清理（业务核心数据）。
+	// monitor 30 天 / balance 90 天 / notify 90 天 / hourly usage 400 天。
+	// rate_change_logs 不清理（业务核心数据）。
 	v.SetDefault("scheduler.retention.cron", "0 17 3 * * *")
 	v.SetDefault("scheduler.retention.monitorLogsDays", 30)
 	v.SetDefault("scheduler.retention.balanceSnapshotsDays", 90)
 	v.SetDefault("scheduler.retention.notificationLogsDays", 90)
 	v.SetDefault("scheduler.retention.usageFiveMinuteHours", 48)
-	v.SetDefault("scheduler.retention.usageHourlyDays", 90)
+	v.SetDefault("scheduler.retention.usageHourlyDays", 400)
 
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.username", "admin")

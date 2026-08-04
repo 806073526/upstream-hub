@@ -23,6 +23,8 @@ const ranges: Array<{ value: UsageTrendRange; label: string }> = [
   { value: "24h", label: "24 小时" },
   { value: "7d", label: "7 天" },
   { value: "30d", label: "30 天" },
+  { value: "6m", label: "半年" },
+  { value: "1y", label: "一年" },
 ]
 
 const seriesColors = [
@@ -43,7 +45,8 @@ const qualityLabels: Record<string, string> = {
   missing: "无数据",
 }
 
-function resolutionLabel(seconds: number) {
+function resolutionLabel(seconds: number, range: UsageTrendRange) {
+  if (range === "6m" || range === "1y") return "月"
   if (seconds >= 86400) return `${seconds / 86400} 天`
   if (seconds >= 3600) return `${seconds / 3600} 小时`
   return `${seconds / 60} 分钟`
@@ -177,7 +180,7 @@ export function UsageOverview() {
               {"区间合计 "}
               <strong className="font-semibold text-foreground">{money(filtered?.rangeTotalAmount)}</strong>
             </span>
-            {trend.data ? <span>{`每 ${resolutionLabel(trend.data.output_resolution_seconds)}`}</span> : null}
+            {trend.data ? <span>{`每 ${resolutionLabel(trend.data.output_resolution_seconds, range)}`}</span> : null}
             {trend.data && !trend.data.complete ? (
               <span className="inline-flex items-center gap-1 text-warning">
                 <AlertCircle className="size-3" />
@@ -227,7 +230,7 @@ export function UsageOverview() {
                   dataKey="startAt"
                   tickLine={false}
                   axisLine={false}
-                  minTickGap={range === "1h" ? 22 : range === "30d" ? 18 : 40}
+                  minTickGap={range === "1h" ? 22 : range === "30d" ? 18 : range === "6m" || range === "1y" ? 24 : 40}
                   tick={{ fill: "var(--muted-foreground)", fontSize: 11 }}
                   tickFormatter={(value) => formatUsageTick(String(value), range)}
                   dy={8}

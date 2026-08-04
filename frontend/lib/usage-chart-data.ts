@@ -3,6 +3,7 @@ import type { UsageTrendRange, UsageTrendResponse } from "@/lib/api-types"
 const BUSINESS_TIME_ZONE = "Asia/Shanghai"
 
 interface DateParts {
+  year: string
   month: string
   day: string
   hour: string
@@ -14,6 +15,7 @@ function dateParts(iso: string): DateParts | null {
   if (Number.isNaN(date.getTime())) return null
   const parts = new Intl.DateTimeFormat("zh-CN", {
     timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
@@ -21,7 +23,7 @@ function dateParts(iso: string): DateParts | null {
     hourCycle: "h23",
   }).formatToParts(date)
   const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? ""
-  return { month: value("month"), day: value("day"), hour: value("hour"), minute: value("minute") }
+  return { year: value("year"), month: value("month"), day: value("day"), hour: value("hour"), minute: value("minute") }
 }
 
 export type UsageChartRow = {
@@ -101,6 +103,7 @@ export function buildFilteredUsageChart(
 export function formatUsageTick(iso: string, range: UsageTrendRange): string {
   const parts = dateParts(iso)
   if (!parts) return iso
+  if (range === "6m" || range === "1y") return `${parts.year}/${parts.month}`
   if (range === "30d") return `${parts.month}/${parts.day}`
   if (range === "7d") return `${parts.month}/${parts.day} ${parts.hour}:00`
   if (range === "1h") return `${parts.hour}:${parts.minute}`
@@ -111,6 +114,7 @@ export function formatUsageInterval(startISO: string, endISO: string, range: Usa
   const start = dateParts(startISO)
   const end = dateParts(endISO)
   if (!start || !end) return startISO
+  if (range === "6m" || range === "1y") return `${start.year}年${start.month}月`
   if (range === "30d") return `${start.month}月${start.day}日`
   const dateLabel = `${start.month}月${start.day}日`
   return `${dateLabel} ${start.hour}:${start.minute}–${end.hour}:${end.minute}`

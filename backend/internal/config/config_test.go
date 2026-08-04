@@ -13,7 +13,7 @@ func TestSchedulerUsageDefaults(t *testing.T) {
 	if cfg.Scheduler.Retention.UsageFiveMinuteHours != 48 {
 		t.Fatalf("five-minute retention = %d", cfg.Scheduler.Retention.UsageFiveMinuteHours)
 	}
-	if cfg.Scheduler.Retention.UsageHourlyDays != 90 {
+	if cfg.Scheduler.Retention.UsageHourlyDays != 400 {
 		t.Fatalf("hourly retention = %d", cfg.Scheduler.Retention.UsageHourlyDays)
 	}
 }

@@ -151,6 +151,7 @@ export interface DashboardSummary {
   active_channels: number
   failed_channels: number
   total_balance: number
+  total_usage: number
   lowest_balance: DashboardLowest | null
   channels: DashboardChannelStat[]
   recent_rate_changes: RateChangeLog[]
@@ -162,7 +163,7 @@ export interface BalanceTrendPoint {
   balance: number
 }
 
-export type UsageTrendRange = "1h" | "today" | "24h" | "7d" | "30d"
+export type UsageTrendRange = "1h" | "today" | "24h" | "7d" | "30d" | "6m" | "1y"
 export type UsagePointQuality = "exact" | "observed" | "mixed" | "missing"
 
 export interface UsageTrendChannel {

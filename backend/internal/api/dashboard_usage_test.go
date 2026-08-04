@@ -16,6 +16,18 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+func TestSumChannelUsageTotalsAllChannels(t *testing.T) {
+	first, second := 1.25, 3.5
+	got, hasData := sumChannelUsage([]storage.Channel{
+		{LastUsageTotal: &first},
+		{LastUsageTotal: nil},
+		{LastUsageTotal: &second},
+	})
+	if !hasData || got != 4.75 {
+		t.Fatalf("sumChannelUsage = (%v, %v), want (4.75, true)", got, hasData)
+	}
+}
+
 func TestDashboardUsageTrendReturnsNullForMissingIntervals(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New()
 	if err != nil {

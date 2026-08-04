@@ -94,8 +94,10 @@ test("formatUsageTick matches the selected statistical granularity", () => {
 
   assert.equal(formatUsageTick(instant, "1h"), "09:05")
   assert.equal(formatUsageTick(instant, "today"), "09:00")
-  assert.equal(formatUsageTick(instant, "7d"), "7/29 09:00")
-  assert.equal(formatUsageTick(instant, "30d"), "7/29")
+	assert.equal(formatUsageTick(instant, "7d"), "7/29 09:00")
+	assert.equal(formatUsageTick(instant, "30d"), "7/29")
+	assert.equal(formatUsageTick("2026-07-01T00:00:00Z", "6m"), "2026/7")
+	assert.equal(formatUsageTick("2026-07-01T00:00:00Z", "1y"), "2026/7")
 })
 
 test("formatUsageInterval describes the actual half-open time bucket", () => {
@@ -103,8 +105,12 @@ test("formatUsageInterval describes the actual half-open time bucket", () => {
     formatUsageInterval("2026-07-29T01:05:00Z", "2026-07-29T01:10:00Z", "1h"),
     "7月29日 09:05–09:10",
   )
-  assert.equal(
-    formatUsageInterval("2026-07-28T16:00:00Z", "2026-07-29T16:00:00Z", "30d"),
-    "7月29日",
-  )
+	assert.equal(
+		formatUsageInterval("2026-07-28T16:00:00Z", "2026-07-29T16:00:00Z", "30d"),
+		"7月29日",
+	)
+	assert.equal(
+		formatUsageInterval("2026-06-30T16:00:00Z", "2026-07-31T16:00:00Z", "6m"),
+		"2026年7月",
+	)
 })

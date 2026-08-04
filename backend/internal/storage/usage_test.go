@@ -24,6 +24,8 @@ func TestResolveUsageTrendSpecUsesExpectedBuckets(t *testing.T) {
 		{"24h", 3600, 3600, now.Truncate(time.Hour).Add(-24 * time.Hour), now.Truncate(time.Hour)},
 		{"7d", 3600, 3600, now.Truncate(time.Hour).Add(-7 * 24 * time.Hour), now.Truncate(time.Hour)},
 		{"30d", 3600, 86400, time.Date(2026, 6, 30, 0, 0, 0, 0, location).UTC(), now},
+		{"6m", 3600, 2592000, time.Date(2026, 2, 1, 0, 0, 0, 0, location).UTC(), time.Date(2026, 8, 1, 0, 0, 0, 0, location).UTC()},
+		{"1y", 3600, 2592000, time.Date(2025, 8, 1, 0, 0, 0, 0, location).UTC(), time.Date(2026, 8, 1, 0, 0, 0, 0, location).UTC()},
 	}
 
 	for _, tt := range tests {
@@ -39,10 +41,38 @@ func TestResolveUsageTrendSpecUsesExpectedBuckets(t *testing.T) {
 				t.Fatalf("unexpected window: %#v", spec)
 			}
 			points := BuildUsageTrend(nil, spec, location, nil)
-			if tt.rangeID == "1h" && len(points) != 12 || tt.rangeID == "24h" && len(points) != 24 || tt.rangeID == "7d" && len(points) != 168 {
+			if tt.rangeID == "1h" && len(points) != 12 || tt.rangeID == "24h" && len(points) != 24 || tt.rangeID == "7d" && len(points) != 168 || tt.rangeID == "6m" && len(points) != 6 || tt.rangeID == "1y" && len(points) != 12 {
 				t.Fatalf("%s points length = %d", tt.rangeID, len(points))
 			}
 		})
+	}
+}
+
+func TestBuildUsageTrendAggregatesHourlyBucketsByCalendarMonth(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 1, 31, 16, 0, 0, 0, time.UTC)
+	buckets := []UsageBucket{
+		{ChannelID: 1, BucketStart: start.Add(2 * time.Hour), BucketEnd: start.Add(3 * time.Hour), ResolutionSeconds: 3600, Amount: 0.2, Quality: "exact", Complete: true},
+		{ChannelID: 1, BucketStart: time.Date(2026, 2, 28, 16, 0, 0, 0, time.UTC), BucketEnd: time.Date(2026, 2, 28, 17, 0, 0, 0, time.UTC), ResolutionSeconds: 3600, Amount: 0.3, Quality: "exact", Complete: true},
+	}
+	spec := UsageTrendSpec{
+		StartAt:                 start,
+		EndAt:                   time.Date(2026, 3, 31, 16, 0, 0, 0, time.UTC),
+		SourceResolutionSeconds: 3600,
+		OutputResolutionSeconds: 2592000,
+	}
+	points := BuildUsageTrend(buckets, spec, location, []uint{1})
+	if len(points) != 2 {
+		t.Fatalf("points length = %d, want 2", len(points))
+	}
+	if !points[0].StartAt.Equal(start) || points[0].TotalAmount != 0.2 {
+		t.Fatalf("first month = %#v", points[0])
+	}
+	if !points[1].StartAt.Equal(time.Date(2026, 2, 28, 16, 0, 0, 0, time.UTC)) || points[1].TotalAmount != 0.3 {
+		t.Fatalf("second month = %#v", points[1])
 	}
 }
 
