@@ -35,7 +35,8 @@ import { ChannelFormDialog } from "@/components/monitor/channel-form-dialog"
 type Status = "healthy" | "low" | "failed" | "idle"
 
 function statusOf(c: Channel): Status {
-  if (c.last_error) return "failed"
+	if (c.monitor_state?.next_attempt_at && new Date(c.monitor_state.next_attempt_at).getTime() > Date.now()) return "failed"
+	if (c.last_error) return "failed"
   if (c.last_balance == null) return "idle"
   if (c.balance_threshold > 0 && c.last_balance < c.balance_threshold) return "low"
   return "healthy"
@@ -451,6 +452,13 @@ export function ChannelCards() {
                       {meta.label}
                     </span>
                   </Row>
+                  {c.monitor_state?.next_attempt_at && new Date(c.monitor_state.next_attempt_at).getTime() > Date.now() ? (
+                    <Row label="自动冷却">
+                      <span className="text-warning">
+                        {`连续失败 ${c.monitor_state.failure_count} 次 · ${new Date(c.monitor_state.next_attempt_at).toLocaleTimeString("zh-CN")} 后重试`}
+                      </span>
+                    </Row>
+                  ) : null}
                   <Row label="上次更新">{relativeTime(c.last_balance_at ?? c.updated_at)}</Row>
                   {c.last_error ? (
                     <div className="py-1">

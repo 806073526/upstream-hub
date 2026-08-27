@@ -21,20 +21,21 @@ import (
 
 // Deps 把所有 handler 需要的依赖打包传入。
 type Deps struct {
-	DB         *gorm.DB
-	Cipher     *crypto.Cipher
-	Auth       *auth.Service
-	Channels   *storage.Channels
-	Sessions   *storage.AuthSessions
-	Captchas   *storage.Captchas
-	Notifies   *storage.Notifications
-	Rates      *storage.Rates
-	Usage      *storage.Usage
-	MonLogs    *storage.MonitorLogs
-	ChannelSvc *channel.Service
-	Monitor    *monitor.Service
-	Dispatcher *notify.Dispatcher
-	Log        *slog.Logger
+	DB            *gorm.DB
+	Cipher        *crypto.Cipher
+	Auth          *auth.Service
+	Channels      *storage.Channels
+	Sessions      *storage.AuthSessions
+	Captchas      *storage.Captchas
+	Notifies      *storage.Notifications
+	Rates         *storage.Rates
+	Usage         *storage.Usage
+	MonLogs       *storage.MonitorLogs
+	MonitorStates *storage.MonitorStates
+	ChannelSvc    *channel.Service
+	Monitor       *monitor.Service
+	Dispatcher    *notify.Dispatcher
+	Log           *slog.Logger
 
 	// Frontend 可选：传入嵌入的前端 dist 文件系统。nil 表示不挂载（本地开发用 vite dev server）。
 	Frontend fs.FS

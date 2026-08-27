@@ -4,6 +4,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -25,6 +26,7 @@ type Scheduler struct {
 	notifies  *storage.Notifications
 	newAPI    *newapiintegration.Client
 	newAPICfg config.NewAPIIntegrationConfig
+	scanLocks sync.Map // map[string]*sync.Mutex; each scheduled scan type has its own lock.
 }
 
 func (s *Scheduler) SetNewAPIIntegration(client *newapiintegration.Client, cfg config.NewAPIIntegrationConfig) {
@@ -95,44 +97,48 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) runBalance() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	s.monitor.ScanAllBalances(ctx)
+	s.runScan("balance", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		s.monitor.ScanAllBalances(ctx)
+	})
 }
 
 func (s *Scheduler) runRates() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	scans := s.monitor.ScanAllRatesWithResults(ctx)
-	if s.newAPI == nil || len(scans) == 0 {
-		return
-	}
-	identities, err := s.newAPI.FetchIdentities(ctx)
-	if err != nil {
-		s.log.Warn("new-api identities sync failed", "err", err)
-		return
-	}
-	converted := make([]newapiintegration.Scan, 0, len(scans))
-	for _, scan := range scans {
-		converted = append(converted, newapiintegration.Scan{
-			ChannelID: scan.Channel.ID,
-			SiteURL:   scan.Channel.SiteURL,
-			Balance:   scan.Channel.LastBalance,
-			BalanceAt: derefTime(scan.Channel.LastBalanceAt),
-			Results:   scan.Results,
-		})
-	}
-	metrics := newapiintegration.BuildMatchedMetrics(identities, converted, time.Now())
-	if err := s.newAPI.PushMetrics(ctx, metrics); err != nil {
-		s.log.Warn("new-api metrics sync failed", "err", err)
-	}
-	if !s.newAPICfg.AutoPriority {
-		return
-	}
-	updates := s.buildPriorityUpdates(identities, metrics)
-	if err := s.newAPI.ApplyPriorities(ctx, updates); err != nil {
-		s.log.Warn("new-api priority sync failed", "err", err)
-	}
+	s.runScan("rates", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		scans := s.monitor.ScanAllRatesWithResults(ctx)
+		if s.newAPI == nil || len(scans) == 0 {
+			return
+		}
+		identities, err := s.newAPI.FetchIdentities(ctx)
+		if err != nil {
+			s.log.Warn("new-api identities sync failed", "err", err)
+			return
+		}
+		converted := make([]newapiintegration.Scan, 0, len(scans))
+		for _, scan := range scans {
+			converted = append(converted, newapiintegration.Scan{
+				ChannelID: scan.Channel.ID,
+				SiteURL:   scan.Channel.SiteURL,
+				Balance:   scan.Channel.LastBalance,
+				BalanceAt: derefTime(scan.Channel.LastBalanceAt),
+				Results:   scan.Results,
+			})
+		}
+		metrics := newapiintegration.BuildMatchedMetrics(identities, converted, time.Now())
+		if err := s.newAPI.PushMetrics(ctx, metrics); err != nil {
+			s.log.Warn("new-api metrics sync failed", "err", err)
+		}
+		if !s.newAPICfg.AutoPriority {
+			return
+		}
+		updates := s.buildPriorityUpdates(identities, metrics)
+		if err := s.newAPI.ApplyPriorities(ctx, updates); err != nil {
+			s.log.Warn("new-api priority sync failed", "err", err)
+		}
+	})
 }
 
 func derefTime(value *time.Time) time.Time {
@@ -179,9 +185,26 @@ func (s *Scheduler) buildPriorityUpdates(identities []newapiintegration.Identity
 }
 
 func (s *Scheduler) runUsage() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	s.monitor.ScanAllUsage(ctx)
+	s.runScan("usage", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		s.monitor.ScanAllUsage(ctx)
+	})
+}
+
+// runScan prevents repeated runs of the same scan type from multiplying its
+// configured per-scan worker count when a cron interval overlaps a slow run.
+// Different scan types remain independent so a slow usage request cannot block
+// balance or rate refreshes.
+func (s *Scheduler) runScan(name string, fn func()) {
+	value, _ := s.scanLocks.LoadOrStore(name, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	if !lock.TryLock() {
+		s.log.Warn("scheduled scan skipped because another scan is running", "scan", name)
+		return
+	}
+	defer lock.Unlock()
+	fn()
 }
 
 func (s *Scheduler) hasRetention() bool {

@@ -90,15 +90,24 @@ func main() {
 	rates := storage.NewRates(db)
 	usage := storage.NewUsage(db)
 	monLogs := storage.NewMonitorLogs(db)
+	monitorStates := storage.NewMonitorStates(db)
 
-	channelSvc := channel.NewService(channels, authSessions, captchas, monLogs, cipher)
-	dispatcher := notify.NewDispatcher(notifies, cipher, log, notify.Policy{
-		BatchRateChanges:   cfg.Notifications.BatchRateChanges,
-		MinChangePct:       cfg.Notifications.MinChangePct,
-		BalanceLowCooldown: time.Duration(cfg.Notifications.BalanceLowCooldownMinutes) * time.Minute,
-		SendMaxAttempts:    cfg.Notifications.SendMaxAttempts,
+	channelSvc := channel.NewService(channels, authSessions, captchas, monLogs, monitorStates, cipher, channel.SessionPolicy{
+		AuthCheckCache: time.Duration(cfg.Monitor.AuthCheckCacheMinutes) * time.Minute,
+		RetryBase:      time.Duration(cfg.Monitor.TransientRetryBaseMinutes) * time.Minute,
+		RetryMax:       time.Duration(cfg.Monitor.TransientRetryMaxMinutes) * time.Minute,
+		AuthRetryBase:  time.Duration(cfg.Monitor.LoginFailureCooldownMinutes) * time.Minute,
+		AuthRetryMax:   time.Duration(cfg.Monitor.LoginFailureMaxCooldownMinutes) * time.Minute,
 	})
-	monitorSvc := monitor.NewService(channels, rates, usage, monLogs, channelSvc, dispatcher, log)
+	dispatcher := notify.NewDispatcher(notifies, cipher, log, notify.Policy{
+		BatchRateChanges:      cfg.Notifications.BatchRateChanges,
+		MinChangePct:          cfg.Notifications.MinChangePct,
+		BalanceLowCooldown:    time.Duration(cfg.Notifications.BalanceLowCooldownMinutes) * time.Minute,
+		LoginFailedCooldown:   time.Duration(cfg.Notifications.LoginFailedCooldownMinutes) * time.Minute,
+		MonitorFailedCooldown: time.Duration(cfg.Notifications.MonitorFailedCooldownMinutes) * time.Minute,
+		SendMaxAttempts:       cfg.Notifications.SendMaxAttempts,
+	})
+	monitorSvc := monitor.NewService(channels, rates, usage, monLogs, channelSvc, dispatcher, log, cfg.Notifications.RecoveryNotifications, cfg.Scheduler.Concurrency)
 
 	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, usage, notifies, log)
 	if cfg.Integration.NewAPI.Enabled {
@@ -134,21 +143,22 @@ func main() {
 	}
 
 	api.Register(router, &api.Deps{
-		DB:         db,
-		Cipher:     cipher,
-		Auth:       authSvc,
-		Channels:   channels,
-		Sessions:   authSessions,
-		Captchas:   captchas,
-		Notifies:   notifies,
-		Rates:      rates,
-		Usage:      usage,
-		MonLogs:    monLogs,
-		ChannelSvc: channelSvc,
-		Monitor:    monitorSvc,
-		Dispatcher: dispatcher,
-		Log:        log,
-		Frontend:   frontendFS,
+		DB:            db,
+		Cipher:        cipher,
+		Auth:          authSvc,
+		Channels:      channels,
+		Sessions:      authSessions,
+		Captchas:      captchas,
+		Notifies:      notifies,
+		Rates:         rates,
+		Usage:         usage,
+		MonLogs:       monLogs,
+		MonitorStates: monitorStates,
+		ChannelSvc:    channelSvc,
+		Monitor:       monitorSvc,
+		Dispatcher:    dispatcher,
+		Log:           log,
+		Frontend:      frontendFS,
 	})
 
 	srv := &http.Server{

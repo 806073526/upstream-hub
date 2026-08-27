@@ -99,6 +99,8 @@ type UsageResult struct {
 	Currency    string
 	ObservedAt  time.Time
 	Buckets     []UsageBucketResult
+	// Warnings are non-fatal issues where summary data was still collected.
+	Warnings []string
 }
 
 // Connector 上游连接器统一接口。
@@ -118,6 +120,13 @@ type Connector interface {
 	GetBalance(ctx context.Context, channel *Channel, session *AuthSession) (*BalanceResult, error)
 	GetRates(ctx context.Context, channel *Channel, session *AuthSession) ([]RateResult, error)
 	GetUsage(ctx context.Context, channel *Channel, session *AuthSession, query UsageQuery) (*UsageResult, error)
+}
+
+// SessionRefresher is an optional capability for connectors whose access
+// session can be renewed without submitting credentials again. NewAPI rc.23
+// rotates a refresh cookie into a short-lived dashboard access token.
+type SessionRefresher interface {
+	Refresh(ctx context.Context, channel *Channel, session *AuthSession) (*AuthSession, error)
 }
 
 // Factory 构造一个全新的 Connector 实例。

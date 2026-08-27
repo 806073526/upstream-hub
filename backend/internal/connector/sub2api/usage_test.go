@@ -200,3 +200,75 @@ func TestGetUsageDefaultsToZeroWithoutTodayCost(t *testing.T) {
 		t.Fatalf("TodayAmount = %#v, want silent zero fallback", result.TodayAmount)
 	}
 }
+
+func TestGetUsageKeepsSummaryWhenTrendFails(t *testing.T) {
+	now := time.Date(2026, 7, 29, 8, 30, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/usage/dashboard/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"total_actual_cost": 12.5},
+			})
+		case "/api/v1/usage/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"total_actual_cost": 1.25},
+			})
+		case "/api/v1/usage/dashboard/trend":
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := New().GetUsage(context.Background(), &connector.Channel{SiteURL: server.URL}, &connector.AuthSession{
+		AccessToken: "test-token",
+	}, connector.UsageQuery{Now: now, Timezone: "Asia/Shanghai", HistorySince: now.Add(-24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("GetUsage returned error: %v", err)
+	}
+	if result.TotalAmount == nil || *result.TotalAmount != 12.5 {
+		t.Fatalf("TotalAmount = %#v, want 12.5", result.TotalAmount)
+	}
+	if result.TodayAmount == nil || *result.TodayAmount != 1.25 {
+		t.Fatalf("TodayAmount = %#v, want 1.25", result.TodayAmount)
+	}
+	if len(result.Buckets) != 0 {
+		t.Fatalf("Buckets = %#v, want no trend buckets after trend failure", result.Buckets)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("Warnings = %#v, want one trend warning", result.Warnings)
+	}
+}
+
+func TestGetUsageDefaultsTrendWindowToOneDay(t *testing.T) {
+	now := time.Date(2026, 7, 29, 8, 30, 0, 0, time.UTC)
+	var startDate string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/usage/dashboard/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"total_actual_cost": 1}})
+		case "/api/v1/usage/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"total_actual_cost": 1}})
+		case "/api/v1/usage/dashboard/trend":
+			startDate = r.URL.Query().Get("start_date")
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"trend": []any{}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := New().GetUsage(context.Background(), &connector.Channel{SiteURL: server.URL}, &connector.AuthSession{
+		AccessToken: "test-token",
+	}, connector.UsageQuery{Now: now, Timezone: "Asia/Shanghai"}); err != nil {
+		t.Fatalf("GetUsage returned error: %v", err)
+	}
+	if startDate != "2026-07-28" {
+		t.Fatalf("trend start_date = %q, want one-day window", startDate)
+	}
+}

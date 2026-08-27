@@ -51,13 +51,14 @@ type Channel struct {
 	MonitorEnabled   bool           `gorm:"default:true" json:"monitor_enabled"`
 
 	// 最近一次采集结果（聚合视图，便于列表页直接展示）
-	LastBalance    *float64   `json:"last_balance,omitempty"`
-	LastBalanceAt  *time.Time `json:"last_balance_at,omitempty"`
-	LastUsageTotal *float64   `gorm:"type:numeric(20,8)" json:"last_usage_total,omitempty"`
-	LastUsageToday *float64   `gorm:"type:numeric(20,8)" json:"last_usage_today,omitempty"`
-	UsageCurrency  string     `gorm:"size:16" json:"usage_currency,omitempty"`
-	LastUsageAt    *time.Time `json:"last_usage_at,omitempty"`
-	LastError      string     `gorm:"type:text" json:"last_error,omitempty"`
+	LastBalance    *float64      `json:"last_balance,omitempty"`
+	LastBalanceAt  *time.Time    `json:"last_balance_at,omitempty"`
+	LastUsageTotal *float64      `gorm:"type:numeric(20,8)" json:"last_usage_total,omitempty"`
+	LastUsageToday *float64      `gorm:"type:numeric(20,8)" json:"last_usage_today,omitempty"`
+	UsageCurrency  string        `gorm:"size:16" json:"usage_currency,omitempty"`
+	LastUsageAt    *time.Time    `json:"last_usage_at,omitempty"`
+	LastError      string        `gorm:"type:text" json:"last_error,omitempty"`
+	MonitorState   *MonitorState `gorm:"-" json:"monitor_state,omitempty"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
@@ -199,11 +200,12 @@ func (NotificationChannel) TableName() string { return "notification_channels" }
 type NotificationEvent string
 
 const (
-	EventBalanceLow    NotificationEvent = "balance_low"
-	EventRateChanged   NotificationEvent = "rate_changed"
-	EventLoginFailed   NotificationEvent = "login_failed"
-	EventCaptchaFailed NotificationEvent = "captcha_failed"
-	EventMonitorFailed NotificationEvent = "monitor_failed"
+	EventBalanceLow       NotificationEvent = "balance_low"
+	EventRateChanged      NotificationEvent = "rate_changed"
+	EventLoginFailed      NotificationEvent = "login_failed"
+	EventCaptchaFailed    NotificationEvent = "captcha_failed"
+	EventMonitorFailed    NotificationEvent = "monitor_failed"
+	EventMonitorRecovered NotificationEvent = "monitor_recovered"
 )
 
 // NotificationLog 通知发送记录。

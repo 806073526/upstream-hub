@@ -24,6 +24,17 @@ export type CaptchaProviderType =
 
 export type MonitorJob = "login" | "balance" | "rates" | "usage"
 
+export interface MonitorState {
+  channel_id: number
+  failure_count: number
+  next_attempt_at?: string | null
+  last_failure_type?: "auth" | "transient" | string
+  last_error?: string
+  last_checked_at?: string | null
+  last_success_at?: string | null
+  updated_at: string
+}
+
 export type NotificationEvent =
   | "balance_low"
   | "rate_changed"
@@ -49,6 +60,7 @@ export interface Channel {
   usage_currency?: string
   last_usage_at?: string | null
   last_error?: string
+  monitor_state?: MonitorState | null
   created_at: string
   updated_at: string
 }

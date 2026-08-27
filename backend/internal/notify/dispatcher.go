@@ -67,7 +67,7 @@ func (d *Dispatcher) Send(ctx context.Context, ch *storage.NotificationChannel, 
 // 订阅过滤：渠道配置 Subscriptions 非空时，必须有任意一条订阅命中 msg 才发送；
 // 空订阅列表（""/null/[]）视为"订阅一切"，向后兼容已有通知渠道。
 //
-// 去抖：balance_low 同渠道在 BalanceLowCooldown 内不重复推送，状态在 PostgreSQL 里持久化。
+// 去抖：balance_low、login_failed 和 monitor_failed 在各自窗口内不重复推送，状态在 PostgreSQL 里持久化。
 // 失败：按 SendMaxAttempts 进行指数退避重试。
 func (d *Dispatcher) Dispatch(ctx context.Context, msg Message) error {
 	if d.suppress(msg) {
@@ -154,18 +154,16 @@ func subsetForSubscriptions(upstreamID uint, changes []RateChange, subs []Subscr
 	return out
 }
 
-// suppress 判断是否要按 cooldown 跳过本次发送。仅对 balance_low 生效。
+// suppress 判断是否要按事件类型的 cooldown 跳过本次发送。
 func (d *Dispatcher) suppress(msg Message) bool {
-	if msg.Event != storage.EventBalanceLow {
-		return false
-	}
 	if msg.ChannelID == 0 {
 		return false
 	}
-	if d.policy.BalanceLowCooldown <= 0 {
+	cooldown := d.cooldownForEvent(msg.Event)
+	if cooldown <= 0 {
 		return false
 	}
-	ok, err := d.cooldown.TryClaimCooldown(msg.ChannelID, msg.Event, d.policy.BalanceLowCooldown)
+	ok, err := d.cooldown.TryClaimCooldown(msg.ChannelID, msg.Event, cooldown)
 	if err != nil {
 		if d.log != nil {
 			d.log.Warn("cooldown lookup failed, sending anyway",
@@ -177,10 +175,23 @@ func (d *Dispatcher) suppress(msg Message) bool {
 		d.log.Debug("notification suppressed by cooldown",
 			"event", msg.Event,
 			"channel_id", msg.ChannelID,
-			"cooldown", d.policy.BalanceLowCooldown,
+			"cooldown", cooldown,
 		)
 	}
 	return !ok
+}
+
+func (d *Dispatcher) cooldownForEvent(event storage.NotificationEvent) time.Duration {
+	switch event {
+	case storage.EventBalanceLow:
+		return d.policy.BalanceLowCooldown
+	case storage.EventLoginFailed, storage.EventCaptchaFailed:
+		return d.policy.LoginFailedCooldown
+	case storage.EventMonitorFailed:
+		return d.policy.MonitorFailedCooldown
+	default:
+		return 0
+	}
 }
 
 // fanout 广播给所有启用的通知渠道（仅给 Dispatch 用，DispatchRateBatch 自己控订阅切片）。

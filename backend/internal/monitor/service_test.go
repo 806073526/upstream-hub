@@ -71,10 +71,10 @@ func TestUsageSampleFromResultSkipsObservedDeltaAfterCounterReset(t *testing.T) 
 	}
 }
 
-func TestUsageHistorySinceBackfillsThirtyDaysWithoutWatermark(t *testing.T) {
+func TestUsageHistorySinceUsesOneDayWithoutWatermark(t *testing.T) {
 	now := time.Date(2026, 7, 29, 3, 5, 0, 0, time.UTC)
-	if got := usageHistorySince(now, nil); !got.Equal(now.Add(-30 * 24 * time.Hour)) {
-		t.Fatalf("usageHistorySince = %s, want 30-day backfill", got)
+	if got := usageHistorySince(now, nil); !got.Equal(now.Add(-24 * time.Hour)) {
+		t.Fatalf("usageHistorySince = %s, want one-day initial window", got)
 	}
 }
 

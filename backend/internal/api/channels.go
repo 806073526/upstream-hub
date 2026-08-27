@@ -30,6 +30,7 @@ func registerChannels(g *gin.RouterGroup, d *Deps) {
 	gp.POST("/:id/sync", func(c *gin.Context) { syncChannel(c, d) })
 	gp.GET("/:id/rates", func(c *gin.Context) { channelRates(c, d) })
 	gp.GET("/:id/balance-history", func(c *gin.Context) { balanceHistory(c, d) })
+	gp.GET("/:id/monitor-state", func(c *gin.Context) { channelMonitorState(c, d) })
 }
 
 type channelInput struct {
@@ -64,6 +65,16 @@ func listChannels(c *gin.Context, d *Deps) {
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
 		return
+	}
+	if d.MonitorStates != nil {
+		for i := range list {
+			state, stateErr := d.MonitorStates.FindByChannel(list[i].ID)
+			if stateErr != nil {
+				fail(c, http.StatusInternalServerError, stateErr)
+				return
+			}
+			list[i].MonitorState = nonEmptyMonitorState(state)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list})
 }
@@ -104,6 +115,14 @@ func getChannel(c *gin.Context, d *Deps) {
 	if err != nil {
 		fail(c, http.StatusNotFound, err)
 		return
+	}
+	if d.MonitorStates != nil {
+		state, stateErr := d.MonitorStates.FindByChannel(ch.ID)
+		if stateErr != nil {
+			fail(c, http.StatusInternalServerError, stateErr)
+			return
+		}
+		ch.MonitorState = nonEmptyMonitorState(state)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": ch})
 }
@@ -193,7 +212,7 @@ func refreshBalance(c *gin.Context, d *Deps) {
 		fail(c, http.StatusNotFound, err)
 		return
 	}
-	if err := d.Monitor.RefreshBalance(c.Request.Context(), ch); err != nil {
+	if err := d.Monitor.RefreshBalanceManual(c.Request.Context(), ch); err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
@@ -211,7 +230,7 @@ func refreshRates(c *gin.Context, d *Deps) {
 		fail(c, http.StatusNotFound, err)
 		return
 	}
-	if err := d.Monitor.RefreshRates(c.Request.Context(), ch); err != nil {
+	if err := d.Monitor.RefreshRatesManual(c.Request.Context(), ch); err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
@@ -229,7 +248,7 @@ func refreshUsage(c *gin.Context, d *Deps) {
 		fail(c, http.StatusNotFound, err)
 		return
 	}
-	if err := d.Monitor.RefreshUsage(c.Request.Context(), ch); err != nil {
+	if err := d.Monitor.RefreshUsageManual(c.Request.Context(), ch); err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
@@ -263,6 +282,31 @@ func balanceHistory(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list})
+}
+
+func channelMonitorState(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	if d.MonitorStates == nil {
+		c.JSON(http.StatusOK, gin.H{"data": &storage.MonitorState{ChannelID: id}})
+		return
+	}
+	state, err := d.MonitorStates.FindByChannel(id)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": nonEmptyMonitorState(state)})
+}
+
+func nonEmptyMonitorState(state *storage.MonitorState) *storage.MonitorState {
+	if state == nil || (state.FailureCount == 0 && state.NextAttemptAt == nil && state.LastCheckedAt == nil && state.LastSuccessAt == nil && state.LastError == "") {
+		return nil
+	}
+	return state
 }
 
 func uintParam(c *gin.Context, name string) (uint, error) {
@@ -352,9 +396,9 @@ func syncChannel(c *gin.Context, d *Deps) {
 	ctx := progress.WithObserver(c.Request.Context(), obs)
 
 	// 串行执行：余额、倍率、用量。任一步失败仍尝试后续步骤。
-	balErr := d.Monitor.RefreshBalance(ctx, ch)
-	rateErr := d.Monitor.RefreshRates(ctx, ch)
-	usageErr := d.Monitor.RefreshUsage(ctx, ch)
+	balErr := d.Monitor.RefreshBalanceManual(ctx, ch)
+	rateErr := d.Monitor.RefreshRatesManual(ctx, ch)
+	usageErr := d.Monitor.RefreshUsageManual(ctx, ch)
 
 	errors := make([]string, 0, 3)
 	for _, err := range []error{balErr, rateErr, usageErr} {

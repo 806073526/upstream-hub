@@ -8,12 +8,23 @@ import (
 
 const maxHTTPErrorSummaryRunes = 300
 
+// HTTPError preserves the upstream status code so callers can distinguish
+// authentication failures from temporary origin/network failures.
+type HTTPError struct {
+	StatusCode int
+	Summary    string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Summary == "" {
+		return fmt.Sprintf("status %d", e.StatusCode)
+	}
+	return fmt.Sprintf("status %d: %s", e.StatusCode, e.Summary)
+}
+
 func HTTPStatusError(statusCode int, body []byte) error {
 	summary := summarizeHTTPErrorBody(body)
-	if summary == "" {
-		return fmt.Errorf("status %d", statusCode)
-	}
-	return fmt.Errorf("status %d: %s", statusCode, summary)
+	return &HTTPError{StatusCode: statusCode, Summary: summary}
 }
 
 func summarizeHTTPErrorBody(body []byte) string {

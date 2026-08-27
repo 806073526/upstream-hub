@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/worryzyy/upstream-hub/internal/captcha"
@@ -25,13 +27,53 @@ const SessionRefreshThreshold = 5 * time.Minute
 // 真正失效检测靠 connector.CheckAuth + 上游 401/403。
 const tokenSessionTTL = 365 * 24 * time.Hour
 
+type SessionPolicy struct {
+	AuthCheckCache time.Duration
+	RetryBase      time.Duration
+	RetryMax       time.Duration
+	AuthRetryBase  time.Duration
+	AuthRetryMax   time.Duration
+}
+
+func cooldownActive(state *storage.MonitorState, now time.Time) (*CooldownError, bool) {
+	if state == nil || state.NextAttemptAt == nil || !state.NextAttemptAt.After(now) {
+		return nil, false
+	}
+	return &CooldownError{Until: *state.NextAttemptAt}, true
+}
+
+func authCheckDue(state *storage.MonitorState, now time.Time, cache time.Duration) bool {
+	if cache <= 0 || state == nil || state.LastCheckedAt == nil {
+		return true
+	}
+	return !state.LastCheckedAt.Add(cache).After(now)
+}
+
+type CooldownError struct {
+	Until time.Time
+}
+
+func (e *CooldownError) Error() string {
+	return fmt.Sprintf("channel monitoring is cooling down until %s", e.Until.Format(time.RFC3339))
+}
+
+func IsCooldown(err error) bool {
+	var cooldown *CooldownError
+	return errors.As(err, &cooldown)
+}
+
 // Service 渠道领域服务。
 type Service struct {
-	Channels     *storage.Channels
-	AuthSessions *storage.AuthSessions
-	Captchas     *storage.Captchas
-	MonitorLogs  *storage.MonitorLogs
-	Cipher       *crypto.Cipher
+	Channels      *storage.Channels
+	AuthSessions  *storage.AuthSessions
+	Captchas      *storage.Captchas
+	MonitorLogs   *storage.MonitorLogs
+	MonitorStates *storage.MonitorStates
+	Cipher        *crypto.Cipher
+	Policy        SessionPolicy
+	locksMu       sync.Mutex
+	locks         map[uint]*sync.Mutex
+	recovered     map[uint]bool
 }
 
 func NewService(
@@ -39,14 +81,29 @@ func NewService(
 	authSessions *storage.AuthSessions,
 	captchas *storage.Captchas,
 	monitorLogs *storage.MonitorLogs,
+	monitorStates *storage.MonitorStates,
 	cipher *crypto.Cipher,
+	policy SessionPolicy,
 ) *Service {
+	if policy.AuthCheckCache <= 0 {
+		policy.AuthCheckCache = 5 * time.Minute
+	}
+	if policy.RetryBase <= 0 {
+		policy.RetryBase = 15 * time.Minute
+	}
+	if policy.RetryMax <= 0 {
+		policy.RetryMax = 2 * time.Hour
+	}
 	return &Service{
-		Channels:     channels,
-		AuthSessions: authSessions,
-		Captchas:     captchas,
-		MonitorLogs:  monitorLogs,
-		Cipher:       cipher,
+		Channels:      channels,
+		AuthSessions:  authSessions,
+		Captchas:      captchas,
+		MonitorLogs:   monitorLogs,
+		MonitorStates: monitorStates,
+		Cipher:        cipher,
+		Policy:        policy,
+		locks:         make(map[uint]*sync.Mutex),
+		recovered:     make(map[uint]bool),
 	}
 }
 
@@ -277,6 +334,9 @@ func validateCredential(channelType storage.ChannelType, mode storage.Credential
 
 func (s *Service) Delete(id uint) error {
 	_ = s.AuthSessions.Delete(id)
+	if s.MonitorStates != nil {
+		_ = s.MonitorStates.Delete(id)
+	}
 	return s.Channels.Delete(id)
 }
 
@@ -403,20 +463,58 @@ func (s *Service) EnsureSession(
 	resolved *connector.Channel,
 	conn connector.Connector,
 ) (*connector.AuthSession, error) {
+	return s.ensureSession(ctx, c, resolved, conn, false)
+}
+
+// EnsureSessionManual bypasses automatic monitoring cooldowns and always
+// validates a cached session. It is used only for user-triggered refreshes.
+func (s *Service) EnsureSessionManual(
+	ctx context.Context,
+	c *storage.Channel,
+	resolved *connector.Channel,
+	conn connector.Connector,
+) (*connector.AuthSession, error) {
+	return s.ensureSession(ctx, c, resolved, conn, true)
+}
+
+func (s *Service) ensureSession(
+	ctx context.Context,
+	c *storage.Channel,
+	resolved *connector.Channel,
+	conn connector.Connector,
+	manual bool,
+) (*connector.AuthSession, error) {
+	unlock := s.lockChannel(c.ID)
+	defer unlock()
+
+	now := time.Now()
+	state, err := s.monitorState(c.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !manual {
+		if cooldown, active := cooldownActive(state, now); active {
+			return nil, cooldown
+		}
+	}
+
 	if c.CredentialMode == storage.CredentialModeToken {
 		progress.Start(ctx, progress.StageSession, "使用用户提供的 token…")
 		session, err := s.buildSessionFromToken(c)
 		if err != nil {
 			progress.Fail(ctx, progress.StageSession, err.Error())
-			_ = s.Channels.SetLastError(c.ID, err.Error())
+			s.recordFailure(c.ID, "transient", err, manual)
 			return nil, err
 		}
-		// 走一次 CheckAuth 确认 token 仍有效。失败立即标 last_error，调用方往上抛错。
-		if err := conn.CheckAuth(ctx, resolved, session); err != nil {
-			msg := "token 已失效，请重新粘贴凭据：" + err.Error()
-			progress.Fail(ctx, progress.StageSession, msg)
-			_ = s.Channels.SetLastError(c.ID, msg)
-			return nil, errors.New(msg)
+		if manual || authCheckDue(state, now, s.Policy.AuthCheckCache) {
+			// token 没有可续期的登录流程，校验失败直接进入渠道退避。
+			if err := conn.CheckAuth(ctx, resolved, session); err != nil {
+				msg := "token 校验失败：" + err.Error()
+				progress.Fail(ctx, progress.StageSession, msg)
+				s.recordFailure(c.ID, failureKind(err), errors.New(msg), manual)
+				return nil, errors.New(msg)
+			}
+			_, _ = s.recordSuccess(c.ID)
 		}
 		_ = s.Channels.SetLastError(c.ID, "")
 		progress.OK(ctx, progress.StageSession, "token 有效，跳过登录")
@@ -427,29 +525,142 @@ func (s *Service) EnsureSession(
 	if err != nil {
 		return nil, err
 	}
-	if saved != nil && saved.ExpiresAt != nil && time.Until(*saved.ExpiresAt) > SessionRefreshThreshold {
+	if saved != nil {
 		session, err := s.decryptSession(saved)
 		if err != nil {
 			return nil, err
 		}
-		// 轻量校验现有 session，不通过则继续走重新登录。
-		progress.Start(ctx, progress.StageSession, "校验已有会话…")
-		if err := conn.CheckAuth(ctx, resolved, session); err == nil {
-			progress.OK(ctx, progress.StageSession, "复用现有会话")
+		if saved.ExpiresAt != nil && time.Until(*saved.ExpiresAt) <= SessionRefreshThreshold {
+			if refresher, ok := conn.(connector.SessionRefresher); ok && session.Cookie != "" {
+				progress.Start(ctx, progress.StageSession, "刷新已有会话…")
+				refreshed, refreshErr := refresher.Refresh(ctx, resolved, session)
+				if refreshErr == nil {
+					if err := s.persistSession(c.ID, refreshed); err != nil {
+						progress.Fail(ctx, progress.StageSession, err.Error())
+						s.recordFailure(c.ID, "transient", err, manual)
+						return nil, err
+					}
+					_, _ = s.recordSuccess(c.ID)
+					_ = s.Channels.SetLastError(c.ID, "")
+					progress.OK(ctx, progress.StageSession, "会话刷新成功")
+					return refreshed, nil
+				}
+				if !manual && failureKind(refreshErr) != "auth" {
+					s.recordFailure(c.ID, failureKind(refreshErr), refreshErr, false)
+					progress.Fail(ctx, progress.StageSession, refreshErr.Error())
+					return nil, refreshErr
+				}
+				if manual {
+					progress.OK(ctx, progress.StageSession, "会话刷新失败，继续手动登录")
+				} else {
+					progress.OK(ctx, progress.StageSession, "会话已失效，重新登录")
+				}
+			}
+		}
+		if saved.ExpiresAt == nil || time.Until(*saved.ExpiresAt) <= SessionRefreshThreshold {
+			return s.loginUnlocked(ctx, c, resolved, conn, manual)
+		}
+		if !manual && !authCheckDue(state, now, s.Policy.AuthCheckCache) {
+			progress.OK(ctx, progress.StageSession, "复用已校验会话")
 			return session, nil
 		}
-		progress.OK(ctx, progress.StageSession, "会话已失效，重新登录")
+		// 轻量校验现有 session。只有 401/403 才允许重新登录，其余错误进入退避。
+		progress.Start(ctx, progress.StageSession, "校验已有会话…")
+		if err := conn.CheckAuth(ctx, resolved, session); err == nil {
+			_, _ = s.recordSuccess(c.ID)
+			progress.OK(ctx, progress.StageSession, "复用现有会话")
+			return session, nil
+		} else if failureKind(err) != "auth" && !manual {
+			s.recordFailure(c.ID, failureKind(err), err, false)
+			progress.Fail(ctx, progress.StageSession, err.Error())
+			return nil, err
+		} else if failureKind(err) != "auth" && manual {
+			// 手动操作可以继续尝试登录，但不修改自动冷却状态。
+			progress.OK(ctx, progress.StageSession, "会话校验失败，继续手动登录")
+		} else {
+			progress.OK(ctx, progress.StageSession, "会话已失效，重新登录")
+		}
 	}
-	return s.login(ctx, c, resolved, conn)
+	return s.loginUnlocked(ctx, c, resolved, conn, manual)
 }
 
-func (s *Service) login(
+// RecoverSession replaces a session rejected by a data endpoint. Recovery is
+// attempted exactly once by the caller: refresh first when supported, then
+// fall back to a full password login. Token credentials cannot self-renew.
+func (s *Service) RecoverSession(
 	ctx context.Context,
 	c *storage.Channel,
 	resolved *connector.Channel,
 	conn connector.Connector,
+	stale *connector.AuthSession,
+) (*connector.AuthSession, error) {
+	if c.CredentialMode == storage.CredentialModeToken {
+		return nil, errors.New("token 凭据已失效，请重新粘贴凭据")
+	}
+
+	unlock := s.lockChannel(c.ID)
+	defer unlock()
+
+	// Another balance/rates/usage request may have recovered this channel while
+	// this request waited for the per-channel lock. Reuse the persisted session
+	// instead of submitting credentials (and possibly a captcha) again.
+	saved, err := s.AuthSessions.FindByChannel(c.ID)
+	if err != nil {
+		return nil, err
+	}
+	if saved != nil {
+		current, err := s.decryptSession(saved)
+		if err != nil {
+			return nil, err
+		}
+		if sessionChanged(stale, current) {
+			progress.OK(ctx, progress.StageSession, "复用其他任务已恢复的会话")
+			return current, nil
+		}
+	}
+
+	if refresher, ok := conn.(connector.SessionRefresher); ok && stale != nil && stale.Cookie != "" {
+		progress.Start(ctx, progress.StageSession, "业务请求鉴权失效，刷新会话…")
+		refreshed, err := refresher.Refresh(ctx, resolved, stale)
+		if err == nil {
+			if err := s.persistSession(c.ID, refreshed); err != nil {
+				progress.Fail(ctx, progress.StageSession, err.Error())
+				return nil, err
+			}
+			_, _ = s.recordSuccess(c.ID)
+			_ = s.Channels.SetLastError(c.ID, "")
+			progress.OK(ctx, progress.StageSession, "会话刷新成功，重试采集")
+			return refreshed, nil
+		}
+		progress.OK(ctx, progress.StageSession, "会话刷新失败，重新登录")
+	}
+
+	// Recovery failures are recorded once by the monitor after this method
+	// returns, so the internal login uses manual failure semantics here.
+	resolved.TurnstileToken = ""
+	return s.loginUnlocked(ctx, c, resolved, conn, true)
+}
+
+func sessionChanged(stale, current *connector.AuthSession) bool {
+	if stale == nil || current == nil {
+		return false
+	}
+	return stale.UserID != current.UserID ||
+		stale.AccessToken != current.AccessToken ||
+		stale.Cookie != current.Cookie ||
+		stale.CSRFToken != current.CSRFToken ||
+		!stale.ExpiresAt.Equal(current.ExpiresAt)
+}
+
+func (s *Service) loginUnlocked(
+	ctx context.Context,
+	c *storage.Channel,
+	resolved *connector.Channel,
+	conn connector.Connector,
+	manual bool,
 ) (*connector.AuthSession, error) {
 	if err := s.prepareTurnstile(ctx, c, resolved, conn); err != nil {
+		s.recordFailure(c.ID, failureKind(err), err, manual)
 		return nil, err
 	}
 	progress.Start(ctx, progress.StageLogin, "登录上游…")
@@ -466,13 +677,16 @@ func (s *Service) login(
 	})
 	if err != nil {
 		progress.Fail(ctx, progress.StageLogin, err.Error())
+		s.recordFailure(c.ID, failureKind(err), err, manual)
 		_ = s.Channels.SetLastError(c.ID, err.Error())
 		return nil, err
 	}
 	if err := s.persistSession(c.ID, session); err != nil {
 		progress.Fail(ctx, progress.StageLogin, err.Error())
+		s.recordFailure(c.ID, "transient", err, manual)
 		return nil, err
 	}
+	_, _ = s.recordSuccess(c.ID)
 	_ = s.Channels.SetLastError(c.ID, "")
 	progress.OK(ctx, progress.StageLogin, "登录成功")
 	return session, nil
@@ -547,11 +761,141 @@ func (s *Service) TestLogin(ctx context.Context, channelID uint) error {
 		return err
 	}
 	if c.CredentialMode == storage.CredentialModeToken {
-		_, err = s.EnsureSession(ctx, c, resolved, conn)
+		_, err = s.ensureSession(ctx, c, resolved, conn, true)
 		return err
 	}
-	_, err = s.login(ctx, c, resolved, conn)
+	unlock := s.lockChannel(c.ID)
+	defer unlock()
+	_, err = s.loginUnlocked(ctx, c, resolved, conn, true)
 	return err
+}
+
+// RecordMonitorFailure records a scheduled data collection failure. It shares
+// the same channel-wide backoff as login failures.
+func (s *Service) RecordMonitorFailure(channelID uint, err error) error {
+	if err == nil || IsCooldown(err) {
+		return nil
+	}
+	unlock := s.lockChannel(channelID)
+	defer unlock()
+	return s.recordFailure(channelID, failureKind(err), err, false)
+}
+
+// RecordMonitorSuccess clears a channel backoff and reports whether this was
+// a recovery from a previous automatic failure.
+func (s *Service) RecordMonitorSuccess(channelID uint) (bool, error) {
+	unlock := s.lockChannel(channelID)
+	defer unlock()
+	recovered := s.recovered[channelID]
+	if _, err := s.recordSuccess(channelID); err != nil {
+		return false, err
+	}
+	if s.recovered[channelID] {
+		recovered = true
+		delete(s.recovered, channelID)
+	}
+	return recovered, nil
+}
+
+func (s *Service) lockChannel(channelID uint) func() {
+	s.locksMu.Lock()
+	lock := s.locks[channelID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		s.locks[channelID] = lock
+	}
+	s.locksMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (s *Service) monitorState(channelID uint) (*storage.MonitorState, error) {
+	if s.MonitorStates == nil {
+		return &storage.MonitorState{ChannelID: channelID}, nil
+	}
+	return s.MonitorStates.FindByChannel(channelID)
+}
+
+func (s *Service) recordFailure(channelID uint, kind string, err error, manual bool) error {
+	if manual || s.MonitorStates == nil {
+		_ = s.Channels.SetLastError(channelID, errString(err))
+		return nil
+	}
+	state, findErr := s.MonitorStates.FindByChannel(channelID)
+	if findErr != nil {
+		return findErr
+	}
+	now := time.Now()
+	base, max := s.Policy.RetryBase, s.Policy.RetryMax
+	if kind == "auth" {
+		if s.Policy.AuthRetryBase > 0 {
+			base = s.Policy.AuthRetryBase
+		}
+		if s.Policy.AuthRetryMax > 0 {
+			max = s.Policy.AuthRetryMax
+		}
+	}
+	next := now.Add(backoffDuration(state.FailureCount+1, base, max))
+	state.RecordFailure(kind, err, next, now)
+	if saveErr := s.MonitorStates.Save(state); saveErr != nil {
+		return saveErr
+	}
+	_ = s.Channels.SetLastError(channelID, errString(err))
+	return nil
+}
+
+func (s *Service) recordSuccess(channelID uint) (bool, error) {
+	if s.MonitorStates == nil {
+		_ = s.Channels.SetLastError(channelID, "")
+		return false, nil
+	}
+	recovered, err := s.MonitorStates.RecordSuccess(channelID, time.Now())
+	if err != nil {
+		return false, err
+	}
+	_ = s.Channels.SetLastError(channelID, "")
+	if recovered {
+		s.recovered[channelID] = true
+	}
+	return recovered, nil
+}
+
+func backoffDuration(failureCount int, base, max time.Duration) time.Duration {
+	if failureCount < 1 {
+		failureCount = 1
+	}
+	if base <= 0 {
+		base = 15 * time.Minute
+	}
+	if max <= 0 {
+		max = 2 * time.Hour
+	}
+	delay := base
+	for i := 1; i < failureCount; i++ {
+		if delay >= max/2 {
+			return max
+		}
+		delay *= 2
+	}
+	if delay > max {
+		return max
+	}
+	return delay
+}
+
+func failureKind(err error) string {
+	var statusErr *connector.HTTPError
+	if errors.As(err, &statusErr) && (statusErr.StatusCode == 401 || statusErr.StatusCode == 403) {
+		return "auth"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "transient"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return "transient"
+	}
+	return "transient"
 }
 
 func errString(err error) string {

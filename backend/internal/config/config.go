@@ -14,6 +14,7 @@ type Config struct {
 	Security      SecurityConfig      `mapstructure:"security"`
 	Auth          AuthConfig          `mapstructure:"auth"`
 	Scheduler     SchedulerConfig     `mapstructure:"scheduler"`
+	Monitor       MonitorConfig       `mapstructure:"monitor"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
 	Integration   IntegrationConfig   `mapstructure:"integration"`
 	Log           LogConfig           `mapstructure:"log"`
@@ -80,6 +81,14 @@ type SchedulerConfig struct {
 	Retention   RetentionConfig `mapstructure:"retention"`
 }
 
+type MonitorConfig struct {
+	AuthCheckCacheMinutes       int `mapstructure:"authCheckCacheMinutes"`
+	TransientRetryBaseMinutes   int `mapstructure:"transientRetryBaseMinutes"`
+	TransientRetryMaxMinutes    int `mapstructure:"transientRetryMaxMinutes"`
+	LoginFailureCooldownMinutes int `mapstructure:"loginFailureCooldownMinutes"`
+	LoginFailureMaxCooldownMinutes int `mapstructure:"loginFailureMaxCooldownMinutes"`
+}
+
 // RetentionConfig 历史数据保留策略。
 //
 // 字段为 0 表示该表不清理，永久保留（默认 rate_change_logs 永远保留，是核心业务数据）。
@@ -108,6 +117,9 @@ type NotificationsConfig struct {
 	BatchRateChanges          bool    `mapstructure:"batchRateChanges"`
 	MinChangePct              float64 `mapstructure:"minChangePct"`
 	BalanceLowCooldownMinutes int     `mapstructure:"balanceLowCooldownMinutes"`
+	LoginFailedCooldownMinutes int    `mapstructure:"loginFailedCooldownMinutes"`
+	MonitorFailedCooldownMinutes int  `mapstructure:"monitorFailedCooldownMinutes"`
+	RecoveryNotifications     bool    `mapstructure:"recoveryNotifications"`
 	SendMaxAttempts           int     `mapstructure:"sendMaxAttempts"`
 }
 
@@ -207,6 +219,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.rateCron", "13 */30 * * * *")
 	v.SetDefault("scheduler.usageCron", "23 */5 * * * *")
 	v.SetDefault("scheduler.concurrency", 4)
+	v.SetDefault("monitor.authCheckCacheMinutes", 5)
+	v.SetDefault("monitor.transientRetryBaseMinutes", 15)
+	v.SetDefault("monitor.transientRetryMaxMinutes", 120)
+	v.SetDefault("monitor.loginFailureCooldownMinutes", 15)
+	v.SetDefault("monitor.loginFailureMaxCooldownMinutes", 120)
 
 	// 历史清理：每天凌晨 3:17 跑一次（6 字段 cron 含秒），
 	// monitor 30 天 / balance 90 天 / notify 90 天 / hourly usage 400 天。
@@ -227,6 +244,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.batchRateChanges", true)
 	v.SetDefault("notifications.minChangePct", 0)
 	v.SetDefault("notifications.balanceLowCooldownMinutes", 60)
+	v.SetDefault("notifications.loginFailedCooldownMinutes", 60)
+	v.SetDefault("notifications.monitorFailedCooldownMinutes", 30)
+	v.SetDefault("notifications.recoveryNotifications", true)
 	v.SetDefault("notifications.sendMaxAttempts", 3)
 	v.SetDefault("integration.newapi.enabled", false)
 	v.SetDefault("integration.newapi.timeoutSeconds", 15)

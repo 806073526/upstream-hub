@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,7 +30,6 @@ type Client struct {
 func New() *Client {
 	c := resty.New().
 		SetTimeout(30*time.Second).
-		SetHeader("User-Agent", "upstream-hub/0.1").
 		SetHeader("Accept", "application/json")
 	return &Client{http: c}
 }
@@ -88,8 +88,13 @@ func (c *Client) Login(ctx context.Context, ch *connector.Channel) (*connector.A
 	}
 
 	var data struct {
-		Require2FA bool  `json:"require_2fa"`
-		ID         int64 `json:"id"`
+		Require2FA      bool   `json:"require_2fa"`
+		ID              int64  `json:"id"`
+		AccessToken     string `json:"access_token"`
+		AccessExpiresAt int64  `json:"access_expires_at"`
+		User            struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
 	}
 	_ = json.Unmarshal(wrapped.Data, &data)
 	if data.Require2FA {
@@ -97,27 +102,96 @@ func (c *Client) Login(ctx context.Context, ch *connector.Channel) (*connector.A
 	}
 
 	cookie := joinCookies(resp.Cookies())
-	if cookie == "" {
+	if cookie == "" && strings.TrimSpace(data.AccessToken) == "" {
 		return nil, errors.New("newapi login: no session cookie returned")
 	}
 	if data.ID == 0 {
-		// 用户 id 是后续 New-Api-User 头的必需值；缺失说明响应格式不对。
-		return nil, errors.New("newapi login: missing user id in response")
+		data.ID = data.User.ID
 	}
-	// NewAPI session 默认有效期较长，保守按 7 天估算；CheckAuth 会兜底失效检测。
+	if data.ID == 0 {
+		// 新版 Bearer 鉴权不需要用户 ID；旧版 Cookie 鉴权仍会尽量带上它。
+		if strings.TrimSpace(data.AccessToken) == "" {
+			return nil, errors.New("newapi login: missing user id in response")
+		}
+	}
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	if data.AccessExpiresAt > 0 {
+		expiresAt = time.Unix(data.AccessExpiresAt, 0)
+	}
 	return &connector.AuthSession{
-		UserID:    strconv.FormatInt(data.ID, 10),
-		Cookie:    cookie,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		UserID:      strconv.FormatInt(data.ID, 10),
+		AccessToken: strings.TrimSpace(data.AccessToken),
+		Cookie:      cookie,
+		ExpiresAt:   expiresAt,
 	}, nil
 }
 
 func (c *Client) CheckAuth(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) error {
-	if session == nil || session.Cookie == "" {
-		return errors.New("missing newapi cookie")
+	if session == nil || (session.Cookie == "" && session.AccessToken == "") {
+		return errors.New("missing newapi session credentials")
 	}
 	_, err := c.getJSON(ctx, strings.TrimRight(ch.SiteURL, "/")+"/api/user/self", session)
 	return err
+}
+
+// Refresh exchanges the rc.23 refresh cookie for a short-lived dashboard
+// access token. The refresh cookie is rotated by NewAPI and must be persisted
+// together with the new access token by the channel service.
+func (c *Client) Refresh(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) (*connector.AuthSession, error) {
+	if session == nil || strings.TrimSpace(session.Cookie) == "" {
+		return nil, errors.New("missing newapi refresh cookie")
+	}
+	site := strings.TrimRight(ch.SiteURL, "/")
+	req := c.http.R().SetContext(ctx).SetHeader("Cookie", session.Cookie)
+	if origin, err := requestOrigin(site); err == nil {
+		req.SetHeader("Origin", origin)
+	}
+	resp, err := req.Post(site + "/api/user/auth/refresh")
+	if err != nil {
+		return nil, fmt.Errorf("newapi refresh http: %w", err)
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("newapi refresh: %w", connector.HTTPStatusError(resp.StatusCode(), resp.Body()))
+	}
+	var wrapped newapiResp
+	if err := json.Unmarshal(resp.Body(), &wrapped); err != nil {
+		return nil, fmt.Errorf("newapi refresh decode: %w", err)
+	}
+	if !wrapped.Success {
+		return nil, fmt.Errorf("newapi refresh: %s", wrapped.Message)
+	}
+	var data struct {
+		AccessToken     string `json:"access_token"`
+		AccessExpiresAt int64  `json:"access_expires_at"`
+		User            struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(wrapped.Data, &data); err != nil {
+		return nil, fmt.Errorf("newapi refresh data decode: %w", err)
+	}
+	accessToken := strings.TrimSpace(data.AccessToken)
+	if accessToken == "" {
+		return nil, errors.New("newapi refresh: missing access token")
+	}
+	userID := session.UserID
+	if userID == "" && data.User.ID > 0 {
+		userID = strconv.FormatInt(data.User.ID, 10)
+	}
+	cookie := joinCookies(resp.Cookies())
+	if cookie == "" {
+		cookie = session.Cookie
+	}
+	expiresAt := time.Now().Add(15 * time.Minute)
+	if data.AccessExpiresAt > 0 {
+		expiresAt = time.Unix(data.AccessExpiresAt, 0)
+	}
+	return &connector.AuthSession{
+		UserID:      userID,
+		AccessToken: accessToken,
+		Cookie:      cookie,
+		ExpiresAt:   expiresAt,
+	}, nil
 }
 
 func (c *Client) GetBalance(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) (*connector.BalanceResult, error) {
@@ -440,6 +514,9 @@ func decodeLinkedTokenGroups(body []byte) (map[string]struct{}, error) {
 func (c *Client) getJSON(ctx context.Context, url string, session *connector.AuthSession) ([]byte, error) {
 	req := c.http.R().SetContext(ctx)
 	if session != nil {
+		if session.AccessToken != "" {
+			req.SetHeader("Authorization", "Bearer "+session.AccessToken)
+		}
 		if session.Cookie != "" {
 			req.SetHeader("Cookie", session.Cookie)
 		}
@@ -468,6 +545,9 @@ func (c *Client) getJSON(ctx context.Context, url string, session *connector.Aut
 func (c *Client) postJSON(ctx context.Context, url string, session *connector.AuthSession, payload any) ([]byte, error) {
 	req := c.http.R().SetContext(ctx).SetHeader("Content-Type", "application/json").SetBody(payload)
 	if session != nil {
+		if session.AccessToken != "" {
+			req.SetHeader("Authorization", "Bearer "+session.AccessToken)
+		}
 		if session.Cookie != "" {
 			req.SetHeader("Cookie", session.Cookie)
 		}
@@ -492,13 +572,31 @@ func (c *Client) postJSON(ctx context.Context, url string, session *connector.Au
 	return wrapped.Data, nil
 }
 
+func requestOrigin(site string) (string, error) {
+	parsed, err := url.Parse(site)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err == nil {
+			err = errors.New("missing scheme or host")
+		}
+		return "", err
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
 func joinCookies(cookies []*http.Cookie) string {
 	if len(cookies) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(cookies))
+	indexes := make(map[string]int, len(cookies))
 	for _, c := range cookies {
-		parts = append(parts, c.Name+"="+c.Value)
+		part := c.Name + "=" + c.Value
+		if index, ok := indexes[c.Name]; ok {
+			parts[index] = part
+			continue
+		}
+		indexes[c.Name] = len(parts)
+		parts = append(parts, part)
 	}
 	return strings.Join(parts, "; ")
 }

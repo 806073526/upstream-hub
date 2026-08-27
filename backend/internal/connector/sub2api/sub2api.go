@@ -23,6 +23,8 @@ type Client struct {
 	http *resty.Client
 }
 
+const sub2APITrendTimeout = 10 * time.Second
+
 func New() *Client {
 	c := resty.New().
 		SetTimeout(30*time.Second).
@@ -186,16 +188,25 @@ func (c *Client) GetUsage(ctx context.Context, ch *connector.Channel, session *c
 
 	historySince := query.HistorySince
 	if historySince.IsZero() {
-		historySince = now.Add(-30 * 24 * time.Hour)
+		historySince = now.Add(-24 * time.Hour)
 	}
 	trendQuery := url.Values{}
 	trendQuery.Set("start_date", historySince.In(location).Format("2006-01-02"))
 	trendQuery.Set("end_date", now.In(location).Format("2006-01-02"))
 	trendQuery.Set("granularity", "hour")
 	trendQuery.Set("timezone", query.Timezone)
-	trendBody, err := c.getJSON(ctx, site+"/api/v1/usage/dashboard/trend?"+trendQuery.Encode(), session)
+	trendCtx, cancelTrend := context.WithTimeout(ctx, sub2APITrendTimeout)
+	trendBody, err := c.getJSON(trendCtx, site+"/api/v1/usage/dashboard/trend?"+trendQuery.Encode(), session)
+	cancelTrend()
+	result := &connector.UsageResult{
+		TotalAmount: &total,
+		TodayAmount: today,
+		Currency:    "USD",
+		ObservedAt:  now,
+	}
 	if err != nil {
-		return nil, fmt.Errorf("sub2api usage trend: %w", err)
+		result.Warnings = []string{fmt.Sprintf("sub2api usage trend: %v", err)}
+		return result, nil
 	}
 	var trend struct {
 		Trend []struct {
@@ -204,14 +215,16 @@ func (c *Client) GetUsage(ctx context.Context, ch *connector.Channel, session *c
 		} `json:"trend"`
 	}
 	if err := json.Unmarshal(trendBody, &trend); err != nil {
-		return nil, fmt.Errorf("sub2api usage trend decode: %w", err)
+		result.Warnings = []string{fmt.Sprintf("sub2api usage trend decode: %v", err)}
+		return result, nil
 	}
 
 	buckets := make([]connector.UsageBucketResult, 0, len(trend.Trend))
 	for _, point := range trend.Trend {
 		startAt, err := time.ParseInLocation("2006-01-02 15:04", point.Date, location)
 		if err != nil {
-			return nil, fmt.Errorf("sub2api usage trend date %q: %w", point.Date, err)
+			result.Warnings = []string{fmt.Sprintf("sub2api usage trend date %q: %v", point.Date, err)}
+			return result, nil
 		}
 		startAt = startAt.UTC()
 		endAt := startAt.Add(time.Hour)
@@ -227,13 +240,8 @@ func (c *Client) GetUsage(ctx context.Context, ch *connector.Channel, session *c
 		})
 	}
 
-	return &connector.UsageResult{
-		TotalAmount: &total,
-		TodayAmount: today,
-		Currency:    "USD",
-		ObservedAt:  now,
-		Buckets:     buckets,
-	}, nil
+	result.Buckets = buckets
+	return result, nil
 }
 
 func (c *Client) GetRates(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) ([]connector.RateResult, error) {

@@ -13,12 +13,15 @@ import (
 //   - BatchRateChanges：同次扫描中合并多条 rate_changed 成一条消息
 //   - MinChangePct：涨跌幅小于阈值时跳过推送（仍写入 RateChangeLog 表）
 //   - BalanceLowCooldown：同渠道 balance_low 在窗口内不重复发送
+//   - LoginFailedCooldown / MonitorFailedCooldown：同渠道失败提醒在窗口内不重复发送
 //   - SendMaxAttempts：单条消息最多发送尝试次数（含首发），<=1 表示不重试
 type Policy struct {
-	BatchRateChanges   bool
-	MinChangePct       float64
-	BalanceLowCooldown time.Duration
-	SendMaxAttempts    int
+	BatchRateChanges      bool
+	MinChangePct          float64
+	BalanceLowCooldown    time.Duration
+	LoginFailedCooldown   time.Duration
+	MonitorFailedCooldown time.Duration
+	SendMaxAttempts       int
 }
 
 // CooldownStore Dispatcher 用来判断某个 (channelID, event) 是否还在冷却窗口。

@@ -51,6 +51,16 @@ scheduler:
     usageFiveMinuteHours: 48      # 5 分钟用量桶保留 48 小时
     usageHourlyDays: 400          # 小时用量桶保留约 13 个月，支持半年/一年按月统计
 
+monitor:
+  # 同一渠道成功校验后，在此窗口内复用校验结果，不重复请求上游鉴权接口。
+  authCheckCacheMinutes: 5
+  # 临时网络/上游故障的首次退避和最大退避，不触发重新登录或打码。
+  transientRetryBaseMinutes: 15
+  transientRetryMaxMinutes: 120
+  # 账号认证失败时的首次退避和最大退避。
+  loginFailureCooldownMinutes: 15
+  loginFailureMaxCooldownMinutes: 120
+
 notifications:
   # 把一次扫描里多个分组的倍率变化合并成 1 条消息发，避免上游大调价瞬间刷屏。
   batchRateChanges: true
@@ -62,6 +72,10 @@ notifications:
   # 单条通知发送失败时最多重试次数（含首次）。1 = 不重试。
   # 退避：1s / 2s / 4s … 上限 30s。
   sendMaxAttempts: 3
+  # 登录失败和监控失败的通知去抖，和余额不足冷却独立。
+  loginFailedCooldownMinutes: 60
+  monitorFailedCooldownMinutes: 30
+  recoveryNotifications: true
 
 integration:
   newapi:

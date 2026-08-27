@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/worryzyy/upstream-hub/internal/businessclock"
@@ -18,13 +19,15 @@ import (
 
 // Service 监控扫描服务。
 type Service struct {
-	channels    *storage.Channels
-	rates       *storage.Rates
-	usage       *storage.Usage
-	monitorLogs *storage.MonitorLogs
-	channelSvc  *channel.Service
-	dispatcher  *notify.Dispatcher
-	log         *slog.Logger
+	channels              *storage.Channels
+	rates                 *storage.Rates
+	usage                 *storage.Usage
+	monitorLogs           *storage.MonitorLogs
+	channelSvc            *channel.Service
+	dispatcher            *notify.Dispatcher
+	log                   *slog.Logger
+	recoveryNotifications bool
+	scanConcurrency       int
 }
 
 type rateSnapshotStore interface {
@@ -46,15 +49,23 @@ func NewService(
 	channelSvc *channel.Service,
 	dispatcher *notify.Dispatcher,
 	log *slog.Logger,
+	recoveryNotifications bool,
+	scanConcurrency ...int,
 ) *Service {
+	concurrency := 1
+	if len(scanConcurrency) > 0 && scanConcurrency[0] > 0 {
+		concurrency = scanConcurrency[0]
+	}
 	return &Service{
-		channels:    channels,
-		rates:       rates,
-		usage:       usage,
-		monitorLogs: monitorLogs,
-		channelSvc:  channelSvc,
-		dispatcher:  dispatcher,
-		log:         log,
+		channels:              channels,
+		rates:                 rates,
+		usage:                 usage,
+		monitorLogs:           monitorLogs,
+		channelSvc:            channelSvc,
+		dispatcher:            dispatcher,
+		log:                   log,
+		recoveryNotifications: recoveryNotifications,
+		scanConcurrency:       concurrency,
 	}
 }
 
@@ -65,19 +76,31 @@ func (s *Service) ScanAllUsage(ctx context.Context) {
 		s.log.Error("list channels", "err", err)
 		return
 	}
-	for i := range list {
-		c := list[i]
-		if err := s.RefreshUsage(ctx, &c); err != nil {
+	scanChannels(ctx, list, s.scanConcurrency, func(ctx context.Context, c *storage.Channel) error {
+		if err := s.RefreshUsage(ctx, c); err != nil {
 			s.log.Warn("refresh usage failed", "channel", c.Name, "err", err)
+			return err
 		}
-	}
+		return nil
+	})
 }
 
 // RefreshUsage 拉取渠道累计、今日和阶段用量并持久化。
 func (s *Service) RefreshUsage(ctx context.Context, c *storage.Channel) error {
-	resolved, conn, session, err := s.prepare(ctx, c)
+	return s.refreshUsage(ctx, c, false)
+}
+
+// RefreshUsageManual runs a user-triggered refresh without automatic cooldown.
+func (s *Service) RefreshUsageManual(ctx context.Context, c *storage.Channel) error {
+	return s.refreshUsage(ctx, c, true)
+}
+
+func (s *Service) refreshUsage(ctx context.Context, c *storage.Channel, manual bool) error {
+	resolved, conn, session, err := s.prepare(ctx, c, manual)
 	if err != nil {
-		s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		if !manual {
+			s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		}
 		return err
 	}
 
@@ -93,11 +116,13 @@ func (s *Service) RefreshUsage(ctx context.Context, c *storage.Channel) error {
 		progress.Fail(ctx, progress.StageUsage, err.Error())
 		return err
 	}
-	result, err := conn.GetUsage(ctx, resolved, session, connector.UsageQuery{
-		Now:          started,
-		Timezone:     businessclock.Timezone,
-		HistorySince: usageHistorySince(started, latestHour),
-	})
+	query := connector.UsageQuery{
+		Now: started, Timezone: businessclock.Timezone, HistorySince: usageHistorySince(started, latestHour),
+	}
+	result, err := requestWithSessionRecovery(ctx, s.channelSvc, c, resolved, conn, session,
+		func(active *connector.AuthSession) (*connector.UsageResult, error) {
+			return conn.GetUsage(ctx, resolved, active, query)
+		})
 	finished := time.Now()
 	_ = s.monitorLogs.Append(&storage.MonitorLog{
 		ChannelID: c.ID, Job: storage.MonitorJobUsage, Success: err == nil,
@@ -105,13 +130,20 @@ func (s *Service) RefreshUsage(ctx context.Context, c *storage.Channel) error {
 	})
 	if err != nil {
 		progress.Fail(ctx, progress.StageUsage, err.Error())
-		s.notifyError(ctx, c, storage.EventMonitorFailed, "用量采集失败", err)
+		if !manual {
+			_ = s.channelSvc.RecordMonitorFailure(c.ID, err)
+			s.notifyError(ctx, c, storage.EventMonitorFailed, "用量采集失败", err)
+		}
 		return err
+	}
+	for _, warning := range result.Warnings {
+		s.log.Warn("refresh usage completed with warning", "channel", c.Name, "warning", warning)
 	}
 	if err := s.usage.Save(usageSampleFromResult(c, result)); err != nil {
 		progress.Fail(ctx, progress.StageUsage, err.Error())
 		return err
 	}
+	s.notifyRecovery(ctx, c)
 	progress.OK(ctx, progress.StageUsage, fmt.Sprintf("累计用量 %.4f，今日 %.4f", valueOrZero(result.TotalAmount), valueOrZero(result.TodayAmount)), map[string]any{
 		"total": result.TotalAmount, "today": result.TodayAmount, "currency": result.Currency,
 	})
@@ -122,7 +154,7 @@ func usageHistorySince(now time.Time, latestHour *time.Time) time.Time {
 	if latestHour != nil {
 		return *latestHour
 	}
-	return now.Add(-30 * 24 * time.Hour)
+	return now.Add(-24 * time.Hour)
 }
 
 func usageSampleFromResult(channel *storage.Channel, result *connector.UsageResult) storage.UsageSample {
@@ -167,12 +199,13 @@ func (s *Service) ScanAllBalances(ctx context.Context) {
 		s.log.Error("list channels", "err", err)
 		return
 	}
-	for i := range list {
-		c := list[i]
-		if err := s.RefreshBalance(ctx, &c); err != nil {
+	scanChannels(ctx, list, s.scanConcurrency, func(ctx context.Context, c *storage.Channel) error {
+		if err := s.RefreshBalance(ctx, c); err != nil {
 			s.log.Warn("refresh balance failed", "channel", c.Name, "err", err)
+			return err
 		}
-	}
+		return nil
+	})
 }
 
 // ScanAllRates 扫描所有启用监控的渠道倍率。
@@ -186,30 +219,107 @@ func (s *Service) ScanAllRatesWithResults(ctx context.Context) []RateScan {
 		s.log.Error("list channels", "err", err)
 		return nil
 	}
-	scans := make([]RateScan, 0, len(list))
+	scans := make([]RateScan, len(list))
+	completed := make([]bool, len(list))
+	indexByID := make(map[uint]int, len(list))
+	var scansMu sync.Mutex
 	for i := range list {
-		c := list[i]
-		results, err := s.RefreshRatesWithResults(ctx, &c)
+		indexByID[list[i].ID] = i
+	}
+	scanChannels(ctx, list, s.scanConcurrency, func(ctx context.Context, c *storage.Channel) error {
+		results, err := s.RefreshRatesWithResults(ctx, c)
 		if err != nil {
 			s.log.Warn("refresh rates failed", "channel", c.Name, "err", err)
-			continue
+			return err
 		}
-		scans = append(scans, RateScan{Channel: c, Results: results})
+		i := indexByID[c.ID]
+		scansMu.Lock()
+		scans[i] = RateScan{Channel: *c, Results: results}
+		completed[i] = true
+		scansMu.Unlock()
+		return nil
+	})
+	out := make([]RateScan, 0, len(scans))
+	for i := range scans {
+		if completed[i] {
+			out = append(out, scans[i])
+		}
 	}
-	return scans
+	return out
+}
+
+// scanChannels runs independent channel refreshes with a bounded number of
+// workers. A slow or unavailable upstream cannot consume the whole scan
+// deadline before other channels get a chance to run.
+func scanChannels(ctx context.Context, list []storage.Channel, concurrency int, fn func(context.Context, *storage.Channel) error) {
+	if len(list) == 0 {
+		return
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > len(list) {
+		concurrency = len(list)
+	}
+
+	jobs := make(chan storage.Channel)
+	var workers sync.WaitGroup
+	workers.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case c, ok := <-jobs:
+					if !ok {
+						return
+					}
+					_ = fn(ctx, &c)
+				}
+			}
+		}()
+	}
+
+	for i := range list {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return
+		case jobs <- list[i]:
+		}
+	}
+	close(jobs)
+	workers.Wait()
 }
 
 // RefreshBalance 单个渠道余额刷新，可被 API 手动触发。
 func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error {
-	resolved, conn, session, err := s.prepare(ctx, c)
+	return s.refreshBalance(ctx, c, false)
+}
+
+// RefreshBalanceManual runs a user-triggered refresh without automatic cooldown.
+func (s *Service) RefreshBalanceManual(ctx context.Context, c *storage.Channel) error {
+	return s.refreshBalance(ctx, c, true)
+}
+
+func (s *Service) refreshBalance(ctx context.Context, c *storage.Channel, manual bool) error {
+	resolved, conn, session, err := s.prepare(ctx, c, manual)
 	if err != nil {
-		s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		if !manual {
+			s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		}
 		return err
 	}
 
 	progress.Start(ctx, progress.StageBalance, "拉取余额…")
 	started := time.Now()
-	res, err := conn.GetBalance(ctx, resolved, session)
+	res, err := requestWithSessionRecovery(ctx, s.channelSvc, c, resolved, conn, session,
+		func(active *connector.AuthSession) (*connector.BalanceResult, error) {
+			return conn.GetBalance(ctx, resolved, active)
+		})
 	finished := time.Now()
 	_ = s.monitorLogs.Append(&storage.MonitorLog{
 		ChannelID:    c.ID,
@@ -221,7 +331,10 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 	})
 	if err != nil {
 		progress.Fail(ctx, progress.StageBalance, err.Error())
-		s.notifyError(ctx, c, storage.EventMonitorFailed, "余额采集失败", err)
+		if !manual {
+			_ = s.channelSvc.RecordMonitorFailure(c.ID, err)
+			s.notifyError(ctx, c, storage.EventMonitorFailed, "余额采集失败", err)
+		}
 		return err
 	}
 
@@ -232,6 +345,7 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 	if err := s.channels.UpdateBalance(c.ID, res.Balance, &sampledAt, ""); err != nil {
 		return err
 	}
+	s.notifyRecovery(ctx, c)
 	_ = s.rates.AppendBalance(&storage.BalanceSnapshot{
 		ChannelID: c.ID,
 		Balance:   res.Balance,
@@ -254,20 +368,35 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 
 // RefreshRates 单个渠道倍率刷新，可被 API 手动触发。
 func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
-	_, err := s.RefreshRatesWithResults(ctx, c)
+	_, err := s.refreshRatesWithResults(ctx, c, false)
+	return err
+}
+
+// RefreshRatesManual runs a user-triggered refresh without automatic cooldown.
+func (s *Service) RefreshRatesManual(ctx context.Context, c *storage.Channel) error {
+	_, err := s.refreshRatesWithResults(ctx, c, true)
 	return err
 }
 
 func (s *Service) RefreshRatesWithResults(ctx context.Context, c *storage.Channel) ([]connector.RateResult, error) {
-	resolved, conn, session, err := s.prepare(ctx, c)
+	return s.refreshRatesWithResults(ctx, c, false)
+}
+
+func (s *Service) refreshRatesWithResults(ctx context.Context, c *storage.Channel, manual bool) ([]connector.RateResult, error) {
+	resolved, conn, session, err := s.prepare(ctx, c, manual)
 	if err != nil {
-		s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		if !manual {
+			s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
+		}
 		return nil, err
 	}
 
 	progress.Start(ctx, progress.StageRates, "拉取分组倍率…")
 	started := time.Now()
-	results, err := conn.GetRates(ctx, resolved, session)
+	results, err := requestWithSessionRecovery(ctx, s.channelSvc, c, resolved, conn, session,
+		func(active *connector.AuthSession) ([]connector.RateResult, error) {
+			return conn.GetRates(ctx, resolved, active)
+		})
 	finished := time.Now()
 	_ = s.monitorLogs.Append(&storage.MonitorLog{
 		ChannelID:    c.ID,
@@ -279,7 +408,10 @@ func (s *Service) RefreshRatesWithResults(ctx context.Context, c *storage.Channe
 	})
 	if err != nil {
 		progress.Fail(ctx, progress.StageRates, err.Error())
-		s.notifyError(ctx, c, storage.EventMonitorFailed, "倍率采集失败", err)
+		if !manual {
+			_ = s.channelSvc.RecordMonitorFailure(c.ID, err)
+			s.notifyError(ctx, c, storage.EventMonitorFailed, "倍率采集失败", err)
+		}
 		return nil, err
 	}
 
@@ -289,6 +421,7 @@ func (s *Service) RefreshRatesWithResults(ctx context.Context, c *storage.Channe
 		progress.Fail(ctx, progress.StageRates, err.Error())
 		return nil, err
 	}
+	s.notifyRecovery(ctx, c)
 	// 一次扫描的所有变化打包推送：去抖策略（合并 / 涨跌幅过滤）由 Dispatcher.Policy 决定。
 	if len(changes) > 0 {
 		_ = s.dispatcher.DispatchRateBatch(ctx, c, changes)
@@ -349,28 +482,81 @@ func reconcileRates(store rateSnapshotStore, channelID uint, results []connector
 	return changes, nil
 }
 
-func (s *Service) prepare(ctx context.Context, c *storage.Channel) (*connector.Channel, connector.Connector, *connector.AuthSession, error) {
+func (s *Service) prepare(ctx context.Context, c *storage.Channel, manual bool) (*connector.Channel, connector.Connector, *connector.AuthSession, error) {
 	resolved, err := s.channelSvc.Resolve(ctx, c)
 	if err != nil {
+		if !manual {
+			_ = s.channelSvc.RecordMonitorFailure(c.ID, err)
+		}
 		return nil, nil, nil, err
 	}
 	conn, err := connector.For(resolved.Type)
 	if err != nil {
+		if !manual {
+			_ = s.channelSvc.RecordMonitorFailure(c.ID, err)
+		}
 		return nil, nil, nil, err
 	}
-	session, err := s.channelSvc.EnsureSession(ctx, c, resolved, conn)
+	var session *connector.AuthSession
+	if manual {
+		session, err = s.channelSvc.EnsureSessionManual(ctx, c, resolved, conn)
+	} else {
+		session, err = s.channelSvc.EnsureSession(ctx, c, resolved, conn)
+	}
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return resolved, conn, session, nil
 }
 
+func requestWithSessionRecovery[T any](
+	ctx context.Context,
+	channelSvc *channel.Service,
+	c *storage.Channel,
+	resolved *connector.Channel,
+	conn connector.Connector,
+	session *connector.AuthSession,
+	request func(*connector.AuthSession) (T, error),
+) (T, error) {
+	result, err := request(session)
+	if err == nil || ClassifyFailure(err) != FailureAuth || c.CredentialMode == storage.CredentialModeToken {
+		return result, err
+	}
+
+	recovered, recoverErr := channelSvc.RecoverSession(ctx, c, resolved, conn, session)
+	if recoverErr != nil {
+		var zero T
+		return zero, fmt.Errorf("会话恢复失败: %w", recoverErr)
+	}
+	return request(recovered)
+}
+
 func (s *Service) notifyError(ctx context.Context, c *storage.Channel, event storage.NotificationEvent, subject string, err error) {
+	if !shouldNotifyFailure(err) {
+		return
+	}
 	_ = s.dispatcher.Dispatch(ctx, notify.Message{
 		Event:     event,
 		ChannelID: c.ID,
 		Subject:   fmt.Sprintf("[upstream-hub] %s %s", c.Name, subject),
 		Body:      err.Error(),
+	})
+}
+
+func shouldNotifyFailure(err error) bool {
+	return err != nil && !channel.IsCooldown(err)
+}
+
+func (s *Service) notifyRecovery(ctx context.Context, c *storage.Channel) {
+	recovered, err := s.channelSvc.RecordMonitorSuccess(c.ID)
+	if err != nil || !recovered || !s.recoveryNotifications {
+		return
+	}
+	_ = s.dispatcher.Dispatch(ctx, notify.Message{
+		Event:     storage.EventMonitorRecovered,
+		ChannelID: c.ID,
+		Subject:   fmt.Sprintf("[upstream-hub] %s 已恢复", c.Name),
+		Body:      "渠道监控请求已恢复成功，自动冷却已解除。",
 	})
 }
 
