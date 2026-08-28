@@ -11,6 +11,15 @@ import (
 	"github.com/worryzyy/upstream-hub/internal/connector"
 )
 
+func TestNewUsesSixtySecondRequestTimeout(t *testing.T) {
+	if got := New().http.GetClient().Timeout; got != 60*time.Second {
+		t.Fatalf("HTTP timeout = %s, want 60s", got)
+	}
+	if sub2APITrendTimeout != 60*time.Second {
+		t.Fatalf("trend timeout = %s, want 60s", sub2APITrendTimeout)
+	}
+}
+
 func TestGetUsageReturnsActualCostAndHourlyTrend(t *testing.T) {
 	now := time.Date(2026, 7, 29, 2, 12, 34, 0, time.UTC)
 	seenTimezone := false

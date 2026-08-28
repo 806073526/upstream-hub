@@ -30,6 +30,8 @@ type Deps struct {
 	Notifies      *storage.Notifications
 	Rates         *storage.Rates
 	Usage         *storage.Usage
+	Profit        *storage.Profit
+	Billing       *storage.Billing
 	MonLogs       *storage.MonitorLogs
 	MonitorStates *storage.MonitorStates
 	ChannelSvc    *channel.Service

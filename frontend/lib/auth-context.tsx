@@ -14,8 +14,9 @@ import {
   setToken,
   setUnauthorizedHandler,
 } from "@/lib/api"
+import type { ApiError } from "@/lib/api"
 
-type AuthStatus = "loading" | "anonymous" | "authenticated"
+type AuthStatus = "loading" | "anonymous" | "authenticated" | "unavailable"
 
 interface AuthContextValue {
   status: AuthStatus
@@ -63,12 +64,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUsername(me.username)
         setStatus("authenticated")
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (cancelled) return
-        // me 失败：本地 token（如果有）已失效；显示登录页
+        // 只有 401 才表示需要登录；网络故障或 5xx 不能伪装成密码登录。
+        const apiError = error as Partial<ApiError>
         setToken(null)
         setUsername(null)
-        setStatus("anonymous")
+        setStatus(apiError.status === 401 ? "anonymous" : "unavailable")
       })
     return () => {
       cancelled = true

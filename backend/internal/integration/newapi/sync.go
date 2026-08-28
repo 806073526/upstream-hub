@@ -14,6 +14,7 @@ import (
 
 type Identity struct {
 	ChannelID      int    `json:"channel_id"`
+	ChannelName    string `json:"channel_name"`
 	BaseURL        string `json:"base_url"`
 	KeyFingerprint string `json:"key_fingerprint"`
 	Priority       int64  `json:"priority"`
@@ -43,6 +44,20 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+}
+
+// HTTPStatusError keeps the response status available to callers that need to
+// distinguish an unsupported optional endpoint from a transient source error.
+type HTTPStatusError struct {
+	Path       string
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return "new-api request failed"
+	}
+	return fmt.Sprintf("new-api request %s: status %d", e.Path, e.StatusCode)
 }
 
 func NewClient(baseURL, token string, timeout time.Duration) *Client {
@@ -87,7 +102,7 @@ func BuildMatchedMetrics(identities []Identity, scans []Scan, now time.Time) []M
 					matches = byKey[identityKey{fingerprint: fingerprint}]
 				}
 				for _, identity := range matches {
-					key := fmt.Sprintf("%d:%s", identity.ChannelID, result.ModelName)
+					key := fmt.Sprintf("%d:%d:%s", identity.ChannelID, scan.ChannelID, result.ModelName)
 					if _, ok := seen[key]; ok {
 						continue
 					}
@@ -199,7 +214,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any, t
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("new-api request %s: status %d", path, resp.StatusCode)
+		return &HTTPStatusError{Path: path, StatusCode: resp.StatusCode}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		return err

@@ -49,17 +49,7 @@ scheduler:
     balanceSnapshotsDays: 90      # 余额采样保留 90 天
     notificationLogsDays: 90      # 通知发送日志保留 90 天
     usageFiveMinuteHours: 48      # 5 分钟用量桶保留 48 小时
-    usageHourlyDays: 400          # 小时用量桶保留约 13 个月，支持半年/一年按月统计
-
-monitor:
-  # 同一渠道成功校验后，在此窗口内复用校验结果，不重复请求上游鉴权接口。
-  authCheckCacheMinutes: 5
-  # 临时网络/上游故障的首次退避和最大退避，不触发重新登录或打码。
-  transientRetryBaseMinutes: 15
-  transientRetryMaxMinutes: 120
-  # 账号认证失败时的首次退避和最大退避。
-  loginFailureCooldownMinutes: 15
-  loginFailureMaxCooldownMinutes: 120
+    usageHourlyDays: 90           # 小时用量桶保留 90 天
 
 notifications:
   # 把一次扫描里多个分组的倍率变化合并成 1 条消息发，避免上游大调价瞬间刷屏。
@@ -72,38 +62,6 @@ notifications:
   # 单条通知发送失败时最多重试次数（含首次）。1 = 不重试。
   # 退避：1s / 2s / 4s … 上限 30s。
   sendMaxAttempts: 3
-  # 登录失败和监控失败的通知去抖，和余额不足冷却独立。
-  loginFailedCooldownMinutes: 60
-  monitorFailedCooldownMinutes: 30
-  recoveryNotifications: true
-
-integration:
-  newapi:
-    enabled: false
-    baseURL: "http://localhost:3000"
-    # Same value as UPSTREAM_HUB_API_TOKEN in new-api.
-    apiToken: ""
-    timeoutSeconds: 15
-    # Keep false to only display metrics. Enable explicitly after observing data.
-    autoPriority: false
-    basePriority: 500
-    priorityStep: 10
-    priorityBucketWidth: 0
-    priorityMaxAgeHours: 48
-    excludedChannelIDs: []
-
-billing:
-  # 从 NewAPI 日志聚合消费事实，并在 UpstreamHub 计算销售额 / 利润。
-  enabled: false
-  cron: "47 */5 * * * *"
-  settlementDelayMinutes: 15
-  overlapMinutes: 30
-  initialLookbackHours: 24
-  # 1 CNY 对应多少美元额度，历史账单会保存当时的快照。
-  # 用户销售折算：12 美元额度 = 1 元人民币（历史账单保存快照）
-  creditUSDPerCNY: 12
-  # 上游成本折算：当前上游充值 1 美元 = 1 元人民币
-  upstreamCostCNYPerUSD: 1
 
 log:
   level: info          # debug | info | warn | error

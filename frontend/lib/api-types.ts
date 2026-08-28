@@ -168,6 +168,139 @@ export interface DashboardSummary {
   channels: DashboardChannelStat[]
   recent_rate_changes: RateChangeLog[]
   recent_notification_logs: NotificationLog[]
+  profit?: {
+    start_at: string
+    end_at: string
+    currency: "CNY" | string
+    summary: ProfitSummary
+  }
+}
+
+export interface ProfitSummary {
+  sale_cny: number
+  cost_cny: number
+  cost_usd?: number
+  stage_usage_cost_cny?: number
+  sales_detail_cny?: number
+  cost_detail_cny?: number
+  allocated_cost_cny?: number
+  unmatched_cost_cny?: number
+  reconciliation_delta_cny?: number
+  profit_cny: number
+  profit_margin: number
+  settled_sale_cny: number
+  unmapped_sale_cny: number
+  unsettled_sale_cny: number
+  bucket_count: number
+  settled_bucket_count: number
+  unmapped_bucket_count: number
+  complete: boolean
+}
+
+export type ProfitTrendRange = "24h" | "7d" | "30d"
+
+export type ProfitDetailKind = "sales" | "cost" | "unmapped" | "reconciliation"
+
+export interface ProfitSaleDetail {
+  source: string
+  source_log_id?: number | null
+  created_at: string
+  bucket_start: string
+  bucket_end: string
+  channel_id: number
+  channel_name?: string
+  newapi_channel_id?: number
+  newapi_channel_name?: string
+  upstream_channel_id?: number | null
+  upstream_channel_name?: string
+  mapping_status: string
+  event_type?: "consume" | "refund" | string
+  group: string
+  model_name: string
+  effective_group_ratio?: number
+  ratio_source?: string
+  normalization_status: string
+  quota: number
+  charged_usd?: number
+  normalized_usd?: number
+  credit_usd_per_cny?: number
+  sale_cny: number
+  cost_cny?: number
+  profit_cny?: number
+  event_count?: number
+  user_id?: number
+  token_name?: string
+  request_id?: string
+  upstream_request_id?: string
+}
+
+export interface ProfitCostDetail {
+  channel_id: number
+  channel_name?: string
+  bucket_start: string
+  bucket_end: string
+  resolution_seconds: number
+  amount: number
+  currency: string
+  cost_cny: number
+  source: string
+  quality: string
+  complete: boolean
+  collected_at: string
+}
+
+export interface ProfitReconciliation {
+  start_at: string
+  end_at: string
+  sales_cny: number
+  sales_detail_cny: number
+  stage_usage_cost_usd: number
+  stage_usage_cost_cny: number
+  cost_detail_cny: number
+  allocated_cost_cny: number
+  unmatched_cost_cny: number
+  unmapped_sales_cny: number
+  profit_cny: number
+  reconciliation_delta_cny: number
+  currency: string
+  complete: boolean
+  details_available: boolean
+}
+
+export interface ProfitDetailsResponse {
+  kind: ProfitDetailKind
+  start_at: string
+  end_at: string
+  usage_resolution_seconds: number
+  page: number
+  page_size: number
+  total: number
+  has_more: boolean
+  items: Array<ProfitSaleDetail | ProfitCostDetail | ProfitReconciliation>
+  reconciliation: ProfitReconciliation
+}
+
+export interface ProfitTrendPoint {
+  start_at: string
+  end_at: string
+  sale_cny: number
+  cost_cny: number
+  profit_cny: number
+  settled_sale_cny: number
+  unmapped_sale_cny: number
+  unsettled_sale_cny: number
+  complete: boolean
+}
+
+export interface ProfitTrendResponse {
+  range: ProfitTrendRange
+  start_at: string
+  end_at: string
+  output_resolution_seconds: number
+  currency: "CNY" | string
+  points: ProfitTrendPoint[]
+  summary: ProfitSummary
+  complete: boolean
 }
 
 export interface BalanceTrendPoint {

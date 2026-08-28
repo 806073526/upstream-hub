@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/worryzyy/upstream-hub/internal/api"
 	"github.com/worryzyy/upstream-hub/internal/auth"
+	"github.com/worryzyy/upstream-hub/internal/billing"
 	"github.com/worryzyy/upstream-hub/internal/channel"
 	"github.com/worryzyy/upstream-hub/internal/config"
 	"github.com/worryzyy/upstream-hub/internal/crypto"
@@ -89,6 +90,8 @@ func main() {
 	notifies := storage.NewNotifications(db)
 	rates := storage.NewRates(db)
 	usage := storage.NewUsage(db)
+	profit := storage.NewProfit(db)
+	billingRepo := storage.NewBillingWithCostRate(db, cfg.Billing.UpstreamCostCNYPerUSD)
 	monLogs := storage.NewMonitorLogs(db)
 	monitorStates := storage.NewMonitorStates(db)
 
@@ -110,15 +113,18 @@ func main() {
 	monitorSvc := monitor.NewService(channels, rates, usage, monLogs, channelSvc, dispatcher, log, cfg.Notifications.RecoveryNotifications, cfg.Scheduler.Concurrency)
 
 	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, usage, notifies, log)
+	var newAPIClient *newapiintegration.Client
 	if cfg.Integration.NewAPI.Enabled {
-		client := newapiintegration.NewClient(
+		newAPIClient = newapiintegration.NewClient(
 			cfg.Integration.NewAPI.BaseURL,
 			cfg.Integration.NewAPI.APIToken,
 			time.Duration(cfg.Integration.NewAPI.TimeoutSeconds)*time.Second,
 		)
-		sch.SetNewAPIIntegration(client, cfg.Integration.NewAPI)
+		sch.SetNewAPIIntegration(newAPIClient, cfg.Integration.NewAPI)
 		log.Info("new-api integration enabled", "baseURL", cfg.Integration.NewAPI.BaseURL, "autoPriority", cfg.Integration.NewAPI.AutoPriority)
 	}
+	billingSvc := billing.NewService(newAPIClient, billingRepo, cfg.Billing, time.Now)
+	sch.SetBillingService(billingSvc, cfg.Billing.Cron)
 	if err := sch.Start(); err != nil {
 		log.Error("start scheduler failed", "err", err)
 		os.Exit(1)
@@ -152,6 +158,8 @@ func main() {
 		Notifies:      notifies,
 		Rates:         rates,
 		Usage:         usage,
+		Profit:        profit,
+		Billing:       billingRepo,
 		MonLogs:       monLogs,
 		MonitorStates: monitorStates,
 		ChannelSvc:    channelSvc,

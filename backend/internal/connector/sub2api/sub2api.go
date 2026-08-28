@@ -23,11 +23,14 @@ type Client struct {
 	http *resty.Client
 }
 
-const sub2APITrendTimeout = 10 * time.Second
+const (
+	sub2APIHTTPTimeout  = 60 * time.Second
+	sub2APITrendTimeout = 60 * time.Second
+)
 
 func New() *Client {
 	c := resty.New().
-		SetTimeout(30*time.Second).
+		SetTimeout(sub2APIHTTPTimeout).
 		SetHeader("User-Agent", "upstream-hub/0.1").
 		SetHeader("Accept", "application/json")
 	return &Client{http: c}

@@ -4,6 +4,7 @@ import { MultiplierChanges } from "@/components/monitor/multiplier-changes"
 import { ChannelCards } from "@/components/monitor/channel-cards"
 import { BottomPanels } from "@/components/monitor/bottom-panels"
 import { UsageOverview } from "@/components/monitor/usage-overview"
+import { ProfitOverview } from "@/components/monitor/profit-overview"
 
 export default function Page() {
   return (
@@ -20,6 +21,8 @@ export default function Page() {
       </div>
 
       <UsageOverview />
+
+      <ProfitOverview />
 
       <ChannelCards />
 

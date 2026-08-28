@@ -13,12 +13,15 @@ import (
 )
 
 var usageTrendNow = time.Now
+var profitTrendNow = time.Now
 
 // registerDashboard 提供首页所需聚合视图。
 func registerDashboard(g *gin.RouterGroup, d *Deps) {
 	g.GET("/dashboard/summary", func(c *gin.Context) { dashboardSummary(c, d) })
 	g.GET("/dashboard/balance-trend", func(c *gin.Context) { dashboardBalanceTrend(c, d) })
 	g.GET("/dashboard/usage-trend", func(c *gin.Context) { dashboardUsageTrend(c, d) })
+	g.GET("/dashboard/profit-trend", func(c *gin.Context) { dashboardProfitTrend(c, d) })
+	g.GET("/dashboard/profit-details", func(c *gin.Context) { dashboardProfitDetails(c, d) })
 }
 
 type dashboardUsageChannel struct {
@@ -113,8 +116,38 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
+	var profit any
+	if d.Profit != nil {
+		location, locationErr := businessclock.Location()
+		if locationErr != nil {
+			fail(c, http.StatusInternalServerError, locationErr)
+			return
+		}
+		now := profitTrendNow().UTC()
+		localNow := now.In(location)
+		dayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location).UTC()
+		rows, rowsErr := d.Profit.ListBuckets(dayStart, now)
+		if rowsErr != nil {
+			fail(c, http.StatusInternalServerError, rowsErr)
+			return
+		}
+		summary := storage.SummarizeProfit(rows)
+		if d.Usage != nil {
+			usage, usageErr := d.Usage.ListBuckets(dayStart, now, 3600)
+			if usageErr != nil {
+				fail(c, http.StatusInternalServerError, usageErr)
+				return
+			}
+			costRate := storage.DefaultUpstreamCostCNYPerUSD
+			if d.Billing != nil {
+				costRate = d.Billing.CostRate()
+			}
+			summary = storage.SummarizeProfitWithUsage(rows, usage, dayStart, now, 3600, costRate)
+		}
+		profit = gin.H{"start_at": dayStart, "end_at": now, "currency": "CNY", "summary": summary}
+	}
 
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"data": gin.H{
 			"total_channels":           len(channels),
 			"active_channels":          activeCount,
@@ -126,7 +159,11 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 			"recent_rate_changes":      recentChanges,
 			"recent_notification_logs": recentNotifs,
 		},
-	})
+	}
+	if profit != nil {
+		response["data"].(gin.H)["profit"] = profit
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func dashboardBalanceTrend(c *gin.Context, d *Deps) {
@@ -267,5 +304,49 @@ func dashboardUsageTrend(c *gin.Context, d *Deps) {
 		"currency":                  "USD", "channels": channelMeta, "points": points,
 		"range_total_amount": rangeTotalAmount, "channel_totals": channelTotals,
 		"complete": rangeComplete,
+	}})
+}
+
+func dashboardProfitTrend(c *gin.Context, d *Deps) {
+	location, err := businessclock.Location()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	rangeID := c.DefaultQuery("range", "24h")
+	spec, err := storage.ResolveProfitTrendSpec(rangeID, profitTrendNow(), location)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	if d.Profit == nil {
+		fail(c, http.StatusServiceUnavailable, fmt.Errorf("profit repository is not configured"))
+		return
+	}
+	rows, err := d.Profit.ListBuckets(spec.StartAt, spec.EndAt)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	summary := storage.SummarizeProfit(rows)
+	points := storage.BuildProfitTrend(rows, spec, location)
+	if d.Usage != nil {
+		usage, usageErr := d.Usage.ListBuckets(spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds)
+		if usageErr != nil {
+			fail(c, http.StatusInternalServerError, usageErr)
+			return
+		}
+		costRate := storage.DefaultUpstreamCostCNYPerUSD
+		if d.Billing != nil {
+			costRate = d.Billing.CostRate()
+		}
+		summary = storage.SummarizeProfitWithUsage(rows, usage, spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds, costRate)
+		points = storage.BuildProfitTrendWithUsage(rows, usage, spec, location, costRate)
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"range": rangeID, "start_at": spec.StartAt, "end_at": spec.EndAt,
+		"output_resolution_seconds": spec.OutputResolutionSeconds,
+		"currency":                  "CNY", "points": points, "summary": summary,
+		"complete": summary.Complete,
 	}})
 }

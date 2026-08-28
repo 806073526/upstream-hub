@@ -92,19 +92,6 @@ integration:
     priorityMaxAgeHours: 48
     excludedChannelIDs: []
 
-billing:
-  # 从 NewAPI 日志聚合消费事实，并在 UpstreamHub 计算销售额 / 利润。
-  enabled: false
-  cron: "47 */5 * * * *"
-  settlementDelayMinutes: 15
-  overlapMinutes: 30
-  initialLookbackHours: 24
-  # 1 CNY 对应多少美元额度，历史账单会保存当时的快照。
-  # 用户销售折算：12 美元额度 = 1 元人民币（历史账单保存快照）
-  creditUSDPerCNY: 12
-  # 上游成本折算：当前上游充值 1 美元 = 1 元人民币
-  upstreamCostCNYPerUSD: 1
-
 log:
   level: info          # debug | info | warn | error
   format: text         # text | json

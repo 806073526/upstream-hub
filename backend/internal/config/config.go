@@ -17,6 +17,7 @@ type Config struct {
 	Monitor       MonitorConfig       `mapstructure:"monitor"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
 	Integration   IntegrationConfig   `mapstructure:"integration"`
+	Billing       BillingConfig       `mapstructure:"billing"`
 	Log           LogConfig           `mapstructure:"log"`
 }
 
@@ -82,10 +83,10 @@ type SchedulerConfig struct {
 }
 
 type MonitorConfig struct {
-	AuthCheckCacheMinutes       int `mapstructure:"authCheckCacheMinutes"`
-	TransientRetryBaseMinutes   int `mapstructure:"transientRetryBaseMinutes"`
-	TransientRetryMaxMinutes    int `mapstructure:"transientRetryMaxMinutes"`
-	LoginFailureCooldownMinutes int `mapstructure:"loginFailureCooldownMinutes"`
+	AuthCheckCacheMinutes          int `mapstructure:"authCheckCacheMinutes"`
+	TransientRetryBaseMinutes      int `mapstructure:"transientRetryBaseMinutes"`
+	TransientRetryMaxMinutes       int `mapstructure:"transientRetryMaxMinutes"`
+	LoginFailureCooldownMinutes    int `mapstructure:"loginFailureCooldownMinutes"`
 	LoginFailureMaxCooldownMinutes int `mapstructure:"loginFailureMaxCooldownMinutes"`
 }
 
@@ -114,13 +115,13 @@ type RetentionConfig struct {
 //   - SendMaxAttempts：单条通知发送失败时最多尝试次数（含首次）。
 //     1 = 不重试。重试采用指数退避：1s / 2s / 4s …，上限 30s。
 type NotificationsConfig struct {
-	BatchRateChanges          bool    `mapstructure:"batchRateChanges"`
-	MinChangePct              float64 `mapstructure:"minChangePct"`
-	BalanceLowCooldownMinutes int     `mapstructure:"balanceLowCooldownMinutes"`
-	LoginFailedCooldownMinutes int    `mapstructure:"loginFailedCooldownMinutes"`
-	MonitorFailedCooldownMinutes int  `mapstructure:"monitorFailedCooldownMinutes"`
-	RecoveryNotifications     bool    `mapstructure:"recoveryNotifications"`
-	SendMaxAttempts           int     `mapstructure:"sendMaxAttempts"`
+	BatchRateChanges             bool    `mapstructure:"batchRateChanges"`
+	MinChangePct                 float64 `mapstructure:"minChangePct"`
+	BalanceLowCooldownMinutes    int     `mapstructure:"balanceLowCooldownMinutes"`
+	LoginFailedCooldownMinutes   int     `mapstructure:"loginFailedCooldownMinutes"`
+	MonitorFailedCooldownMinutes int     `mapstructure:"monitorFailedCooldownMinutes"`
+	RecoveryNotifications        bool    `mapstructure:"recoveryNotifications"`
+	SendMaxAttempts              int     `mapstructure:"sendMaxAttempts"`
 }
 
 type LogConfig struct {
@@ -143,6 +144,16 @@ type NewAPIIntegrationConfig struct {
 	PriorityBucketWidth float64 `mapstructure:"priorityBucketWidth"`
 	PriorityMaxAgeHours int     `mapstructure:"priorityMaxAgeHours"`
 	ExcludedChannelIDs  []uint  `mapstructure:"excludedChannelIDs"`
+}
+
+type BillingConfig struct {
+	Enabled                bool    `mapstructure:"enabled"`
+	Cron                   string  `mapstructure:"cron"`
+	SettlementDelayMinutes int     `mapstructure:"settlementDelayMinutes"`
+	OverlapMinutes         int     `mapstructure:"overlapMinutes"`
+	InitialLookbackHours   int     `mapstructure:"initialLookbackHours"`
+	CreditUSDPerCNY        float64 `mapstructure:"creditUSDPerCNY"`
+	UpstreamCostCNYPerUSD  float64 `mapstructure:"upstreamCostCNYPerUSD"`
 }
 
 // Load 读取 config.yaml（可选）+ APP_SECRET / UPSTREAMHUB_* 环境变量覆盖。
@@ -188,6 +199,13 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("database.sslMode", "UPSTREAMHUB_DATABASE_SSLMODE")
 	_ = v.BindEnv("integration.newapi.baseURL", "UPSTREAMHUB_NEWAPI_BASE_URL")
 	_ = v.BindEnv("integration.newapi.apiToken", "UPSTREAM_HUB_API_TOKEN")
+	_ = v.BindEnv("billing.enabled", "UPSTREAMHUB_BILLING_ENABLED")
+	_ = v.BindEnv("billing.cron", "UPSTREAMHUB_BILLING_CRON")
+	_ = v.BindEnv("billing.settlementDelayMinutes", "UPSTREAMHUB_BILLING_SETTLEMENT_DELAY_MINUTES")
+	_ = v.BindEnv("billing.overlapMinutes", "UPSTREAMHUB_BILLING_OVERLAP_MINUTES")
+	_ = v.BindEnv("billing.initialLookbackHours", "UPSTREAMHUB_BILLING_INITIAL_LOOKBACK_HOURS")
+	_ = v.BindEnv("billing.creditUSDPerCNY", "UPSTREAMHUB_BILLING_CREDIT_USD_PER_CNY")
+	_ = v.BindEnv("billing.upstreamCostCNYPerUSD", "UPSTREAMHUB_BILLING_UPSTREAM_COST_CNY_PER_USD")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -255,6 +273,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("integration.newapi.priorityStep", int64(10))
 	v.SetDefault("integration.newapi.priorityBucketWidth", 0)
 	v.SetDefault("integration.newapi.priorityMaxAgeHours", 48)
+	v.SetDefault("billing.enabled", false)
+	v.SetDefault("billing.cron", "47 */5 * * * *")
+	v.SetDefault("billing.settlementDelayMinutes", 15)
+	v.SetDefault("billing.overlapMinutes", 30)
+	v.SetDefault("billing.initialLookbackHours", 24)
+	v.SetDefault("billing.creditUSDPerCNY", 12.0)
+	v.SetDefault("billing.upstreamCostCNYPerUSD", 1.0)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")

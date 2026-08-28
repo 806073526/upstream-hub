@@ -14,6 +14,10 @@ import type {
   RateSnapshot,
   UsageTrendRange,
   UsageTrendResponse,
+  ProfitTrendRange,
+  ProfitTrendResponse,
+  ProfitDetailKind,
+  ProfitDetailsResponse,
 } from "@/lib/api-types"
 
 export interface QueryState<T> {
@@ -155,6 +159,20 @@ export function useBalanceTrend(range: BalanceTrendRange = "7d", channelIDs?: nu
 
 export function useUsageTrend(range: UsageTrendRange = "24h") {
   return useApi<UsageTrendResponse>(`/dashboard/usage-trend?range=${range}`)
+}
+
+export function useProfitTrend(range: ProfitTrendRange = "24h") {
+  return useApi<ProfitTrendResponse>(`/dashboard/profit-trend?range=${range}`)
+}
+
+export function useProfitDetails(kind: ProfitDetailKind = "reconciliation", range: ProfitTrendRange = "24h", page = 1, pageSize = 25) {
+  const query = new URLSearchParams({
+    range,
+    kind,
+    page: String(page),
+    page_size: String(pageSize),
+  })
+  return useApi<ProfitDetailsResponse>(`/dashboard/profit-details?${query.toString()}`)
 }
 
 export function useChannels() {

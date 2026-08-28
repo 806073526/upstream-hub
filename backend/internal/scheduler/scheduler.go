@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"github.com/worryzyy/upstream-hub/internal/billing"
 	"github.com/worryzyy/upstream-hub/internal/config"
 	newapiintegration "github.com/worryzyy/upstream-hub/internal/integration/newapi"
 	"github.com/worryzyy/upstream-hub/internal/monitor"
@@ -16,22 +17,29 @@ import (
 )
 
 type Scheduler struct {
-	cfg       config.SchedulerConfig
-	log       *slog.Logger
-	cron      *cron.Cron
-	monitor   *monitor.Service
-	monLogs   *storage.MonitorLogs
-	rates     *storage.Rates
-	usage     *storage.Usage
-	notifies  *storage.Notifications
-	newAPI    *newapiintegration.Client
-	newAPICfg config.NewAPIIntegrationConfig
-	scanLocks sync.Map // map[string]*sync.Mutex; each scheduled scan type has its own lock.
+	cfg         config.SchedulerConfig
+	log         *slog.Logger
+	cron        *cron.Cron
+	monitor     *monitor.Service
+	monLogs     *storage.MonitorLogs
+	rates       *storage.Rates
+	usage       *storage.Usage
+	notifies    *storage.Notifications
+	newAPI      *newapiintegration.Client
+	newAPICfg   config.NewAPIIntegrationConfig
+	billing     *billing.Service
+	billingCron string
+	scanLocks   sync.Map // map[string]*sync.Mutex; each scheduled scan type has its own lock.
 }
 
 func (s *Scheduler) SetNewAPIIntegration(client *newapiintegration.Client, cfg config.NewAPIIntegrationConfig) {
 	s.newAPI = client
 	s.newAPICfg = cfg
+}
+
+func (s *Scheduler) SetBillingService(service *billing.Service, cronSpec string) {
+	s.billing = service
+	s.billingCron = cronSpec
 }
 
 func New(
@@ -71,6 +79,11 @@ func (s *Scheduler) Start() error {
 			return err
 		}
 	}
+	if s.billing != nil && s.billing.Enabled() && s.billingCron != "" {
+		if _, err := s.cron.AddFunc(s.billingCron, s.runBilling); err != nil {
+			return err
+		}
+	}
 	if s.cfg.Retention.Cron != "" && s.hasRetention() {
 		if _, err := s.cron.AddFunc(s.cfg.Retention.Cron, s.runRetention); err != nil {
 			return err
@@ -81,6 +94,7 @@ func (s *Scheduler) Start() error {
 		"balanceCron", s.cfg.BalanceCron,
 		"rateCron", s.cfg.RateCron,
 		"usageCron", s.cfg.UsageCron,
+		"billingCron", s.billingCron,
 		"retentionCron", s.cfg.Retention.Cron,
 		"concurrency", s.cfg.Concurrency,
 	)
@@ -128,6 +142,11 @@ func (s *Scheduler) runRates() {
 			})
 		}
 		metrics := newapiintegration.BuildMatchedMetrics(identities, converted, time.Now())
+		if s.billing != nil {
+			if err := s.billing.SaveMappings(identities, metrics, time.Now().UTC()); err != nil {
+				s.log.Warn("billing mapping snapshot failed", "err", err)
+			}
+		}
 		if err := s.newAPI.PushMetrics(ctx, metrics); err != nil {
 			s.log.Warn("new-api metrics sync failed", "err", err)
 		}
@@ -189,6 +208,16 @@ func (s *Scheduler) runUsage() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		s.monitor.ScanAllUsage(ctx)
+	})
+}
+
+func (s *Scheduler) runBilling() {
+	s.runScan("billing", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.billing.Sync(ctx); err != nil {
+			s.log.Warn("billing sync failed", "err", err)
+		}
 	})
 }
 
