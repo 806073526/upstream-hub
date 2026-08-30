@@ -36,7 +36,9 @@ func (r *Notifications) FindChannel(id uint) (*NotificationChannel, error) {
 
 func (r *Notifications) CreateChannel(c *NotificationChannel) error { return r.db.Create(c).Error }
 func (r *Notifications) UpdateChannel(c *NotificationChannel) error { return r.db.Save(c).Error }
-func (r *Notifications) DeleteChannel(id uint) error                { return r.db.Delete(&NotificationChannel{}, id).Error }
+func (r *Notifications) DeleteChannel(id uint) error {
+	return r.db.Delete(&NotificationChannel{}, id).Error
+}
 
 func (r *Notifications) AppendLog(l *NotificationLog) error {
 	if l.SentAt.IsZero() {

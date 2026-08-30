@@ -187,6 +187,12 @@ export interface ProfitSummary {
   unmatched_cost_cny?: number
   reconciliation_delta_cny?: number
   profit_cny: number
+  external_sales_cny: number
+  operating_profit_cny: number
+  personal_usage_cny: number
+  net_profit_cny: number
+  personal_usage_complete: boolean
+  net_profit_complete: boolean
   profit_margin: number
   settled_sale_cny: number
   unmapped_sale_cny: number
@@ -261,6 +267,12 @@ export interface ProfitReconciliation {
   unmatched_cost_cny: number
   unmapped_sales_cny: number
   profit_cny: number
+  external_sales_cny: number
+  operating_profit_cny: number
+  personal_usage_cny: number
+  net_profit_cny: number
+  personal_usage_complete: boolean
+  net_profit_complete: boolean
   reconciliation_delta_cny: number
   currency: string
   complete: boolean
@@ -286,6 +298,12 @@ export interface ProfitTrendPoint {
   sale_cny: number
   cost_cny: number
   profit_cny: number
+  external_sales_cny: number
+  operating_profit_cny: number
+  personal_usage_cny: number
+  net_profit_cny: number
+  personal_usage_complete: boolean
+  net_profit_complete: boolean
   settled_sale_cny: number
   unmapped_sale_cny: number
   unsettled_sale_cny: number

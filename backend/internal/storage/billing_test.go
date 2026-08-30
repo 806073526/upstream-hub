@@ -174,3 +174,75 @@ func TestReplaceBillingWindowUsesGORMNewAPIChannelNameColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestListPersonalUsageBucketsWithStatusTreatsCoveredEmptyRowsAsCompleteZero(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	initialStart := start.Add(-24 * time.Hour)
+	lastSuccess := end
+	completed := end
+	updated := end.Add(time.Minute)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "newapi_personal_usage_buckets" WHERE bucket_start < $1 AND bucket_end > $2 ORDER BY bucket_start ASC, id ASC`)).
+		WithArgs(end, start).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "billing_sync_states" WHERE source = $1 ORDER BY "billing_sync_states"."source" LIMIT $2`)).
+		WithArgs("new-api", 1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"source", "last_successful_end_at", "initial_sync_started_at", "initial_sync_target_end_at", "initial_sync_completed_at",
+			"last_attempt_at", "last_success_at", "status", "last_error", "updated_at",
+		}).AddRow("new-api", lastSuccess, initialStart, end, completed, end, end, "success", "", updated))
+
+	rows, complete, err := NewBilling(db).ListPersonalUsageBucketsWithStatus(start, end, 0)
+	if err != nil {
+		t.Fatalf("ListPersonalUsageBucketsWithStatus returned error: %v", err)
+	}
+	if len(rows) != 0 || !complete {
+		t.Fatalf("rows/complete = %d/%v, want empty rows and complete zero", len(rows), complete)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListPersonalUsageBucketsIncludesBucketOverlappingQueryStart(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "newapi_personal_usage_buckets" WHERE bucket_start < $1 AND bucket_end > $2 ORDER BY bucket_start ASC, id ASC`)).
+		WithArgs(end, start).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
+
+	rows, err := NewBilling(db).ListPersonalUsageBuckets(start, end, 0)
+	if err != nil {
+		t.Fatalf("ListPersonalUsageBuckets returned error: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != 7 {
+		t.Fatalf("rows = %#v, want overlapping bucket", rows)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

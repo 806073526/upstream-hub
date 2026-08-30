@@ -82,7 +82,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, msg Message) error {
 //   - 然后对每个通知渠道：先用它自己的 Subscriptions 切片出它关心的 changes，
 //     再按 BatchRateChanges 决定合并发送 1 条还是逐条发送
 //
-// 关键：合并消息只包含订阅匹配的子集，避免"全合并后 ModelName='' 被 groups 模式订阅过滤掉"的边界。
+// 关键：合并消息只包含订阅匹配的子集，避免"全合并后 ModelName=” 被 groups 模式订阅过滤掉"的边界。
 func (d *Dispatcher) DispatchRateBatch(ctx context.Context, channel *storage.Channel, changes []RateChange) error {
 	if channel == nil || len(changes) == 0 {
 		return nil

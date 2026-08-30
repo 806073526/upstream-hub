@@ -131,18 +131,35 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 			fail(c, http.StatusInternalServerError, rowsErr)
 			return
 		}
+		var usage []storage.UsageBucket
 		summary := storage.SummarizeProfit(rows)
 		if d.Usage != nil {
-			usage, usageErr := d.Usage.ListBuckets(dayStart, now, 3600)
+			usageRows, usageErr := d.Usage.ListBuckets(dayStart, now, 3600)
 			if usageErr != nil {
 				fail(c, http.StatusInternalServerError, usageErr)
+				return
+			}
+			if usageRows == nil {
+				usageRows = []storage.UsageBucket{}
+			}
+			usage = usageRows
+			costRate := storage.DefaultUpstreamCostCNYPerUSD
+			if d.Billing != nil {
+				costRate = d.Billing.CostRate()
+			}
+			summary = storage.SummarizeProfitWithUsage(rows, usage, dayStart, now, 3600, costRate)
+		}
+		if d.PersonalUsage != nil {
+			personal, personalComplete, personalErr := listPersonalUsageBucketsWithStatus(d.PersonalUsage, dayStart, now, 0)
+			if personalErr != nil {
+				fail(c, http.StatusInternalServerError, personalErr)
 				return
 			}
 			costRate := storage.DefaultUpstreamCostCNYPerUSD
 			if d.Billing != nil {
 				costRate = d.Billing.CostRate()
 			}
-			summary = storage.SummarizeProfitWithUsage(rows, usage, dayStart, now, 3600, costRate)
+			summary = storage.SummarizeProfitWithPersonalUsage(rows, usage, personal, dayStart, now, 3600, costRate, personalComplete)
 		}
 		profit = gin.H{"start_at": dayStart, "end_at": now, "currency": "CNY", "summary": summary}
 	}
@@ -328,14 +345,19 @@ func dashboardProfitTrend(c *gin.Context, d *Deps) {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
+	var usage []storage.UsageBucket
 	summary := storage.SummarizeProfit(rows)
 	points := storage.BuildProfitTrend(rows, spec, location)
 	if d.Usage != nil {
-		usage, usageErr := d.Usage.ListBuckets(spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds)
+		usageRows, usageErr := d.Usage.ListBuckets(spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds)
 		if usageErr != nil {
 			fail(c, http.StatusInternalServerError, usageErr)
 			return
 		}
+		if usageRows == nil {
+			usageRows = []storage.UsageBucket{}
+		}
+		usage = usageRows
 		costRate := storage.DefaultUpstreamCostCNYPerUSD
 		if d.Billing != nil {
 			costRate = d.Billing.CostRate()
@@ -343,10 +365,24 @@ func dashboardProfitTrend(c *gin.Context, d *Deps) {
 		summary = storage.SummarizeProfitWithUsage(rows, usage, spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds, costRate)
 		points = storage.BuildProfitTrendWithUsage(rows, usage, spec, location, costRate)
 	}
+	complete := summary.Complete
+	if d.PersonalUsage != nil {
+		personal, personalComplete, personalErr := listPersonalUsageBucketsWithStatus(d.PersonalUsage, spec.StartAt, spec.EndAt, 0)
+		if personalErr != nil {
+			fail(c, http.StatusInternalServerError, personalErr)
+			return
+		}
+		costRate := storage.DefaultUpstreamCostCNYPerUSD
+		if d.Billing != nil {
+			costRate = d.Billing.CostRate()
+		}
+		summary = storage.SummarizeProfitWithPersonalUsage(rows, usage, personal, spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds, costRate, personalComplete)
+		points = storage.BuildProfitTrendWithPersonalUsageStatus(rows, usage, personal, spec, location, costRate, personalComplete)
+	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"range": rangeID, "start_at": spec.StartAt, "end_at": spec.EndAt,
 		"output_resolution_seconds": spec.OutputResolutionSeconds,
 		"currency":                  "CNY", "points": points, "summary": summary,
-		"complete": summary.Complete,
+		"complete": complete,
 	}})
 }

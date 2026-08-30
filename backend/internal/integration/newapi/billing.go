@@ -12,6 +12,12 @@ const (
 	BillingMaxRangeSeconds = 7 * 24 * 60 * 60
 )
 
+// Setup contains the NewAPI installation metadata needed to determine the
+// earliest safe point for a first billing sync.
+type Setup struct {
+	InitializedAt int64 `json:"initialized_at"`
+}
+
 type BillingAggregateRequest struct {
 	StartAt       int64 `json:"start_at"`
 	EndAt         int64 `json:"end_at"`
@@ -35,13 +41,24 @@ type BillingBucket struct {
 }
 
 type BillingAggregate struct {
-	Source        string          `json:"source"`
-	StartAt       int64           `json:"start_at"`
-	EndAt         int64           `json:"end_at"`
-	BucketSeconds int             `json:"bucket_seconds"`
-	QuotaPerUnit  float64         `json:"quota_per_unit"`
-	Complete      bool            `json:"complete"`
-	Items         []BillingBucket `json:"items"`
+	Source                string                `json:"source"`
+	StartAt               int64                 `json:"start_at"`
+	EndAt                 int64                 `json:"end_at"`
+	BucketSeconds         int                   `json:"bucket_seconds"`
+	QuotaPerUnit          float64               `json:"quota_per_unit"`
+	Complete              bool                  `json:"complete"`
+	Items                 []BillingBucket       `json:"items"`
+	PersonalUsageItems    []PersonalUsageBucket `json:"personal_usage_items"`
+	PersonalUsageComplete bool                  `json:"personal_usage_complete"`
+}
+
+type PersonalUsageBucket struct {
+	BucketStart  int64 `json:"bucket_start"`
+	BucketEnd    int64 `json:"bucket_end"`
+	ConsumeQuota int64 `json:"consume_quota"`
+	RefundQuota  int64 `json:"refund_quota"`
+	NetQuota     int64 `json:"net_quota"`
+	EventCount   int64 `json:"event_count"`
 }
 
 type BillingDetailRequest struct {
@@ -79,6 +96,24 @@ type BillingDetails struct {
 	HasMore  bool           `json:"has_more"`
 	Complete bool           `json:"complete"`
 	Items    []BillingEvent `json:"items"`
+}
+
+func (c *Client) FetchSetup(ctx context.Context) (Setup, error) {
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    Setup  `json:"data"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/internal/upstream-hub/setup", nil, &response); err != nil {
+		return Setup{}, err
+	}
+	if !response.Success {
+		return Setup{}, fmt.Errorf("new-api setup: %s", response.Message)
+	}
+	if response.Data.InitializedAt <= 0 {
+		return Setup{}, fmt.Errorf("new-api setup: invalid initialized_at")
+	}
+	return response.Data, nil
 }
 
 func (c *Client) FetchBillingAggregate(ctx context.Context, request BillingAggregateRequest) (BillingAggregate, error) {

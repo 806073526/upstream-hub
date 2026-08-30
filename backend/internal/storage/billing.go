@@ -54,6 +54,74 @@ type NewAPIBillingBucket struct {
 
 func (NewAPIBillingBucket) TableName() string { return "newapi_billing_buckets" }
 
+// NewAPIPersonalUsageBucket is a separate ledger for consumption made by
+// Root accounts. Keeping it independent from NewAPIBillingBucket prevents
+// self-use from inflating sales while still allowing profit reconciliation.
+type NewAPIPersonalUsageBucket struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	FactKey           string    `gorm:"size:128;not null;uniqueIndex" json:"fact_key"`
+	BucketStart       time.Time `gorm:"not null;index:idx_newapi_personal_usage_window" json:"bucket_start"`
+	BucketEnd         time.Time `gorm:"not null" json:"bucket_end"`
+	ResolutionSeconds int       `gorm:"not null;index:idx_newapi_personal_usage_window" json:"resolution_seconds"`
+	ConsumeQuota      int64     `gorm:"not null" json:"consume_quota"`
+	RefundQuota       int64     `gorm:"not null" json:"refund_quota"`
+	NetQuota          int64     `gorm:"not null" json:"net_quota"`
+	EventCount        int64     `gorm:"not null" json:"event_count"`
+	QuotaPerUnit      float64   `gorm:"not null" json:"quota_per_unit"`
+	CreditUSDPerCNY   float64   `gorm:"type:numeric(20,8);not null" json:"credit_usd_per_cny"`
+	PersonalUsageCNY  float64   `gorm:"type:numeric(20,8);not null" json:"personal_usage_cny"`
+	Complete          bool      `gorm:"not null;default:false" json:"complete"`
+	CollectedAt       time.Time `gorm:"not null;index" json:"collected_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (NewAPIPersonalUsageBucket) TableName() string { return "newapi_personal_usage_buckets" }
+
+type PersonalUsageFactInput struct {
+	BucketStart  time.Time
+	BucketEnd    time.Time
+	ConsumeQuota int64
+	RefundQuota  int64
+	EventCount   int64
+	QuotaPerUnit float64
+	Complete     bool
+}
+
+func BuildNewAPIPersonalUsageBucket(input PersonalUsageFactInput, creditUSDPerCNY float64, collectedAt time.Time) (NewAPIPersonalUsageBucket, error) {
+	if input.BucketStart.IsZero() || !input.BucketEnd.After(input.BucketStart) {
+		return NewAPIPersonalUsageBucket{}, errors.New("invalid personal usage bucket window")
+	}
+	if input.QuotaPerUnit <= 0 || math.IsNaN(input.QuotaPerUnit) || math.IsInf(input.QuotaPerUnit, 0) {
+		return NewAPIPersonalUsageBucket{}, errors.New("invalid personal usage quota_per_unit")
+	}
+	if creditUSDPerCNY <= 0 || math.IsNaN(creditUSDPerCNY) || math.IsInf(creditUSDPerCNY, 0) {
+		return NewAPIPersonalUsageBucket{}, errors.New("invalid personal usage credit_usd_per_cny")
+	}
+	if input.ConsumeQuota < 0 || input.RefundQuota < 0 {
+		return NewAPIPersonalUsageBucket{}, errors.New("personal usage quota cannot be negative")
+	}
+	if collectedAt.IsZero() {
+		collectedAt = time.Now().UTC()
+	}
+	netQuota := input.ConsumeQuota - input.RefundQuota
+	usageCNY := float64(netQuota) / (input.QuotaPerUnit * creditUSDPerCNY)
+	bucket := NewAPIPersonalUsageBucket{
+		BucketStart: input.BucketStart.UTC(), BucketEnd: input.BucketEnd.UTC(),
+		ResolutionSeconds: int(input.BucketEnd.Sub(input.BucketStart) / time.Second),
+		ConsumeQuota:      input.ConsumeQuota, RefundQuota: input.RefundQuota, NetQuota: netQuota,
+		EventCount: input.EventCount, QuotaPerUnit: input.QuotaPerUnit, CreditUSDPerCNY: creditUSDPerCNY,
+		PersonalUsageCNY: usageCNY, Complete: input.Complete, CollectedAt: collectedAt.UTC(),
+	}
+	bucket.FactKey = personalUsageFactKey(bucket)
+	return bucket, nil
+}
+
+func personalUsageFactKey(bucket NewAPIPersonalUsageBucket) string {
+	raw := fmt.Sprintf("%d|%d|%d", bucket.BucketStart.Unix(), bucket.BucketEnd.Unix(), bucket.ResolutionSeconds)
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 // NewAPIBillingEvent preserves the source log facts behind an aggregated
 // billing bucket. Aggregates are convenient for settlement, while events make
 // every sales figure auditable without exposing the request body.
@@ -92,13 +160,16 @@ func (NewAPIBillingEvent) TableName() string { return "newapi_billing_events" }
 // BillingSyncState is a singleton-per-source watermark. The end watermark is
 // advanced only in the same transaction as the corresponding bucket rewrite.
 type BillingSyncState struct {
-	Source              string     `gorm:"primaryKey;size:64" json:"source"`
-	LastSuccessfulEndAt *time.Time `json:"last_successful_end_at,omitempty"`
-	LastAttemptAt       *time.Time `json:"last_attempt_at,omitempty"`
-	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
-	Status              string     `gorm:"size:16;not null" json:"status"`
-	LastError           string     `gorm:"type:text" json:"last_error,omitempty"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	Source                 string     `gorm:"primaryKey;size:64" json:"source"`
+	LastSuccessfulEndAt    *time.Time `json:"last_successful_end_at,omitempty"`
+	InitialSyncStartedAt   *time.Time `json:"initial_sync_started_at,omitempty"`
+	InitialSyncTargetEndAt *time.Time `json:"initial_sync_target_end_at,omitempty"`
+	InitialSyncCompletedAt *time.Time `json:"initial_sync_completed_at,omitempty"`
+	LastAttemptAt          *time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt          *time.Time `json:"last_success_at,omitempty"`
+	Status                 string     `gorm:"size:16;not null" json:"status"`
+	LastError              string     `gorm:"type:text" json:"last_error,omitempty"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 func (BillingSyncState) TableName() string { return "billing_sync_states" }
@@ -362,6 +433,124 @@ func (r *Billing) SettleAndReplaceWindowWithEvents(windowStart, windowEnd time.T
 	})
 }
 
+// SettleAndReplaceWindowWithPersonalUsage atomically replaces sales, the
+// Root-user usage ledger, and the profit read model for a source window.
+func (r *Billing) SettleAndReplaceWindowWithPersonalUsage(windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIBillingBucket, personal []NewAPIPersonalUsageBucket, now time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("billing database is not initialized")
+	}
+	if !windowEnd.After(windowStart) || resolutionSeconds <= 0 {
+		return errors.New("invalid billing replacement window")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		profits, err := r.buildProfitBucketsForWindow(tx, windowStart, windowEnd, buckets)
+		if err != nil {
+			return err
+		}
+		if err := replaceBillingWindowTx(tx, windowStart, windowEnd, resolutionSeconds, buckets, now); err != nil {
+			return err
+		}
+		if err := replacePersonalUsageWindowTx(tx, windowStart, windowEnd, resolutionSeconds, personal, now); err != nil {
+			return err
+		}
+		return replaceProfitWindowTx(tx, windowStart, windowEnd, profits, now)
+	})
+}
+
+func (r *Billing) SettleAndReplaceWindowAndAdvanceWithPersonalUsage(source string, windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIBillingBucket, personal []NewAPIPersonalUsageBucket, state BillingSyncState, now time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("billing database is not initialized")
+	}
+	if source == "" || !windowEnd.After(windowStart) || resolutionSeconds <= 0 {
+		return errors.New("invalid billing replacement window")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	state.Source = source
+	state.UpdatedAt = now.UTC()
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		profits, err := r.buildProfitBucketsForWindow(tx, windowStart, windowEnd, buckets)
+		if err != nil {
+			return err
+		}
+		if err := replaceBillingWindowTx(tx, windowStart, windowEnd, resolutionSeconds, buckets, now); err != nil {
+			return err
+		}
+		if err := replacePersonalUsageWindowTx(tx, windowStart, windowEnd, resolutionSeconds, personal, now); err != nil {
+			return err
+		}
+		if err := replaceProfitWindowTx(tx, windowStart, windowEnd, profits, now); err != nil {
+			return err
+		}
+		return saveBillingSyncStateTx(tx, state)
+	})
+}
+
+func (r *Billing) SettleAndReplaceWindowWithEventsAndPersonalUsage(windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIBillingBucket, events []NewAPIBillingEvent, personal []NewAPIPersonalUsageBucket, now time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("billing database is not initialized")
+	}
+	if !windowEnd.After(windowStart) || resolutionSeconds <= 0 {
+		return errors.New("invalid billing replacement window")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		profits, err := r.buildProfitBucketsForWindow(tx, windowStart, windowEnd, buckets)
+		if err != nil {
+			return err
+		}
+		if err := replaceBillingWindowTx(tx, windowStart, windowEnd, resolutionSeconds, buckets, now); err != nil {
+			return err
+		}
+		if err := replaceBillingEventsWindowTx(tx, windowStart, windowEnd, events, now); err != nil {
+			return err
+		}
+		if err := replacePersonalUsageWindowTx(tx, windowStart, windowEnd, resolutionSeconds, personal, now); err != nil {
+			return err
+		}
+		return replaceProfitWindowTx(tx, windowStart, windowEnd, profits, now)
+	})
+}
+
+func (r *Billing) SettleAndReplaceWindowAndAdvanceWithEventsAndPersonalUsage(source string, windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIBillingBucket, events []NewAPIBillingEvent, personal []NewAPIPersonalUsageBucket, state BillingSyncState, now time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("billing database is not initialized")
+	}
+	if source == "" || !windowEnd.After(windowStart) || resolutionSeconds <= 0 {
+		return errors.New("invalid billing replacement window")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	state.Source = source
+	state.UpdatedAt = now.UTC()
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		profits, err := r.buildProfitBucketsForWindow(tx, windowStart, windowEnd, buckets)
+		if err != nil {
+			return err
+		}
+		if err := replaceBillingWindowTx(tx, windowStart, windowEnd, resolutionSeconds, buckets, now); err != nil {
+			return err
+		}
+		if err := replaceBillingEventsWindowTx(tx, windowStart, windowEnd, events, now); err != nil {
+			return err
+		}
+		if err := replacePersonalUsageWindowTx(tx, windowStart, windowEnd, resolutionSeconds, personal, now); err != nil {
+			return err
+		}
+		if err := replaceProfitWindowTx(tx, windowStart, windowEnd, profits, now); err != nil {
+			return err
+		}
+		return saveBillingSyncStateTx(tx, state)
+	})
+}
+
 func replaceBillingWindowTx(tx *gorm.DB, windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIBillingBucket, now time.Time) error {
 	if err := tx.Where("bucket_start >= ? AND bucket_start < ? AND resolution_seconds = ?", windowStart, windowEnd, resolutionSeconds).Delete(&NewAPIBillingBucket{}).Error; err != nil {
 		return err
@@ -376,6 +565,28 @@ func replaceBillingWindowTx(tx *gorm.DB, windowStart, windowEnd time.Time, resol
 			DoUpdates: clause.AssignmentColumns([]string{
 				"bucket_end", "resolution_seconds", "consume_quota", "refund_quota", "net_quota", "event_count",
 				"new_api_channel_name", "upstream_channel_id", "mapping_status", "quota_per_unit", "charged_usd", "normalized_usd", "credit_usd_per_cny", "sale_cny", "complete", "collected_at", "updated_at",
+			}),
+		}).Create(&buckets[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replacePersonalUsageWindowTx(tx *gorm.DB, windowStart, windowEnd time.Time, resolutionSeconds int, buckets []NewAPIPersonalUsageBucket, now time.Time) error {
+	if err := tx.Where("bucket_start >= ? AND bucket_start < ? AND resolution_seconds = ?", windowStart, windowEnd, resolutionSeconds).Delete(&NewAPIPersonalUsageBucket{}).Error; err != nil {
+		return err
+	}
+	for i := range buckets {
+		buckets[i].UpdatedAt = now.UTC()
+		if buckets[i].CollectedAt.IsZero() {
+			buckets[i].CollectedAt = now.UTC()
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "fact_key"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"bucket_start", "bucket_end", "resolution_seconds", "consume_quota", "refund_quota", "net_quota", "event_count",
+				"quota_per_unit", "credit_usd_per_cny", "personal_usage_cny", "complete", "collected_at", "updated_at",
 			}),
 		}).Create(&buckets[i]).Error; err != nil {
 			return err
@@ -584,7 +795,7 @@ func saveBillingSyncStateTx(tx *gorm.DB, state BillingSyncState) error {
 	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "source"}},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"last_successful_end_at", "last_attempt_at", "last_success_at", "status", "last_error", "updated_at",
+			"last_successful_end_at", "initial_sync_started_at", "initial_sync_target_end_at", "initial_sync_completed_at", "last_attempt_at", "last_success_at", "status", "last_error", "updated_at",
 		}),
 	}).Create(&state).Error
 }
@@ -719,6 +930,61 @@ func (r *Billing) CountEvents(start, end time.Time) (int64, error) {
 	var total int64
 	err := r.db.Model(&NewAPIBillingEvent{}).Where("created_at >= ? AND created_at < ?", start, end).Count(&total).Error
 	return total, err
+}
+
+func (r *Billing) ListPersonalUsageBuckets(start, end time.Time, resolutionSeconds int) ([]NewAPIPersonalUsageBucket, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("billing database is not initialized")
+	}
+	// Include any bucket that overlaps the requested half-open interval. A
+	// bucket may start before the query window (for example after a resolution
+	// rebuild), and excluding it would undercount the covered portion.
+	query := r.db.Where("bucket_start < ? AND bucket_end > ?", end, start)
+	if resolutionSeconds > 0 {
+		query = query.Where("resolution_seconds = ?", resolutionSeconds)
+	}
+	var rows []NewAPIPersonalUsageBucket
+	err := query.Order("bucket_start ASC, id ASC").Find(&rows).Error
+	return rows, err
+}
+
+// ListPersonalUsageBucketsWithStatus returns Root-user usage together with a
+// source-level completeness flag. A successful empty response is a complete
+// zero only when the sync watermark proves that the source covered the whole
+// requested range; an empty database or an older partial sync remains
+// incomplete.
+func (r *Billing) ListPersonalUsageBucketsWithStatus(start, end time.Time, resolutionSeconds int) ([]NewAPIPersonalUsageBucket, bool, error) {
+	rows, err := r.ListPersonalUsageBuckets(start, end, resolutionSeconds)
+	if err != nil {
+		return nil, false, err
+	}
+	state, err := r.GetSyncState("new-api")
+	if err != nil {
+		return nil, false, err
+	}
+
+	endCovered := billingSyncEndCovers(state, end)
+	if len(rows) == 0 {
+		// Without materialized rows we need a known initial-sync start to prove
+		// that this interval was queried and returned zero Root usage.
+		return rows, endCovered && billingSyncRangeStartsAt(state, start), nil
+	}
+	_, rowsCovered := SumPersonalUsageCNY(rows, start, end, resolutionSeconds)
+	return rows, endCovered && rowsCovered, nil
+}
+
+func billingSyncEndCovers(state BillingSyncState, end time.Time) bool {
+	if !end.After(time.Time{}) || state.LastSuccessfulEndAt == nil || state.LastSuccessfulEndAt.IsZero() {
+		return false
+	}
+	return !state.LastSuccessfulEndAt.UTC().Before(end.UTC())
+}
+
+func billingSyncRangeStartsAt(state BillingSyncState, start time.Time) bool {
+	if state.InitialSyncStartedAt == nil || state.InitialSyncStartedAt.IsZero() {
+		return false
+	}
+	return !start.UTC().Before(state.InitialSyncStartedAt.UTC())
 }
 
 func (r *Billing) SaveSyncState(state BillingSyncState) error {

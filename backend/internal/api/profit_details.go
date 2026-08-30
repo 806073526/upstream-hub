@@ -62,21 +62,27 @@ type profitCostDetail struct {
 }
 
 type profitReconciliation struct {
-	StartAt             time.Time `json:"start_at"`
-	EndAt               time.Time `json:"end_at"`
-	SalesCNY            float64   `json:"sales_cny"`
-	SalesDetailCNY      float64   `json:"sales_detail_cny"`
-	StageUsageCostUSD   float64   `json:"stage_usage_cost_usd"`
-	StageUsageCostCNY   float64   `json:"stage_usage_cost_cny"`
-	CostDetailCNY       float64   `json:"cost_detail_cny"`
-	AllocatedCostCNY    float64   `json:"allocated_cost_cny"`
-	UnmatchedCostCNY    float64   `json:"unmatched_cost_cny"`
-	UnmappedSalesCNY    float64   `json:"unmapped_sales_cny"`
-	ProfitCNY           float64   `json:"profit_cny"`
-	ReconciliationDelta float64   `json:"reconciliation_delta_cny"`
-	Currency            string    `json:"currency"`
-	Complete            bool      `json:"complete"`
-	DetailsAvailable    bool      `json:"details_available"`
+	StartAt               time.Time `json:"start_at"`
+	EndAt                 time.Time `json:"end_at"`
+	SalesCNY              float64   `json:"sales_cny"`
+	SalesDetailCNY        float64   `json:"sales_detail_cny"`
+	StageUsageCostUSD     float64   `json:"stage_usage_cost_usd"`
+	StageUsageCostCNY     float64   `json:"stage_usage_cost_cny"`
+	CostDetailCNY         float64   `json:"cost_detail_cny"`
+	AllocatedCostCNY      float64   `json:"allocated_cost_cny"`
+	UnmatchedCostCNY      float64   `json:"unmatched_cost_cny"`
+	UnmappedSalesCNY      float64   `json:"unmapped_sales_cny"`
+	ExternalSalesCNY      float64   `json:"external_sales_cny"`
+	ProfitCNY             float64   `json:"profit_cny"`
+	OperatingProfitCNY    float64   `json:"operating_profit_cny"`
+	PersonalUsageCNY      float64   `json:"personal_usage_cny"`
+	NetProfitCNY          float64   `json:"net_profit_cny"`
+	PersonalUsageComplete bool      `json:"personal_usage_complete"`
+	NetProfitComplete     bool      `json:"net_profit_complete"`
+	ReconciliationDelta   float64   `json:"reconciliation_delta_cny"`
+	Currency              string    `json:"currency"`
+	Complete              bool      `json:"complete"`
+	DetailsAvailable      bool      `json:"details_available"`
 }
 
 func dashboardProfitDetails(c *gin.Context, d *Deps) {
@@ -121,14 +127,32 @@ func dashboardProfitDetails(c *gin.Context, d *Deps) {
 			fail(c, http.StatusInternalServerError, err)
 			return
 		}
+		if usage == nil {
+			usage = []storage.UsageBucket{}
+		}
+	}
+	var personal []storage.NewAPIPersonalUsageBucket
+	personalComplete := false
+	if d.PersonalUsage != nil {
+		personal, personalComplete, err = listPersonalUsageBucketsWithStatus(d.PersonalUsage, spec.StartAt, spec.EndAt, 0)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	summary := storage.SummarizeProfitWithUsage(profits, usage, spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds, costRate)
+	if d.PersonalUsage != nil {
+		summary = storage.SummarizeProfitWithPersonalUsage(profits, usage, personal, spec.StartAt, spec.EndAt, spec.UsageResolutionSeconds, costRate, personalComplete)
+	}
 	reconciliation := profitReconciliation{
 		StartAt: spec.StartAt, EndAt: spec.EndAt, SalesCNY: summary.SaleCNY,
 		SalesDetailCNY: summary.SalesDetailCNY, StageUsageCostUSD: summary.CostUSD,
 		StageUsageCostCNY: summary.StageUsageCostCNY, CostDetailCNY: summary.CostDetailCNY,
 		AllocatedCostCNY: summary.AllocatedCostCNY, UnmatchedCostCNY: summary.UnmatchedCostCNY,
-		UnmappedSalesCNY: summary.UnmappedSaleCNY, ProfitCNY: summary.ProfitCNY,
+		UnmappedSalesCNY: summary.UnmappedSaleCNY, ExternalSalesCNY: summary.ExternalSalesCNY,
+		ProfitCNY: summary.ProfitCNY, OperatingProfitCNY: summary.OperatingProfitCNY,
+		PersonalUsageCNY: summary.PersonalUsageCNY, NetProfitCNY: summary.NetProfitCNY,
+		PersonalUsageComplete: summary.PersonalUsageComplete, NetProfitComplete: summary.NetProfitComplete,
 		ReconciliationDelta: summary.ReconciliationDelta, Currency: "CNY", Complete: summary.Complete,
 	}
 

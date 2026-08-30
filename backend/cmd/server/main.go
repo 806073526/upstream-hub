@@ -160,6 +160,7 @@ func main() {
 		Usage:         usage,
 		Profit:        profit,
 		Billing:       billingRepo,
+		PersonalUsage: billingRepo,
 		MonLogs:       monLogs,
 		MonitorStates: monitorStates,
 		ChannelSvc:    channelSvc,

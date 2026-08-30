@@ -74,6 +74,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&BalanceSnapshot{},
 		&UsageBucket{},
 		&NewAPIBillingBucket{},
+		&NewAPIPersonalUsageBucket{},
 		&NewAPIBillingEvent{},
 		&BillingSyncState{},
 		&BillingMappingSnapshot{},

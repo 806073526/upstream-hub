@@ -107,3 +107,28 @@ func TestFetchBillingAggregateRejectsInvalidWindowBeforeRequest(t *testing.T) {
 		t.Fatalf("error = %v, want invalid billing aggregation window", err)
 	}
 }
+
+func TestFetchSetupReturnsInitializationTimeAndSendsBearerToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/api/internal/upstream-hub/setup" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"success":true,"data":{"initialized_at":1704067200}}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-token", time.Second)
+	setup, err := client.FetchSetup(context.Background())
+	if err != nil {
+		t.Fatalf("FetchSetup returned error: %v", err)
+	}
+	if setup.InitializedAt != 1704067200 {
+		t.Fatalf("initialized_at = %d, want 1704067200", setup.InitializedAt)
+	}
+}

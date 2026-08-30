@@ -20,6 +20,18 @@ const ranges: Array<{ value: ProfitTrendRange; label: string }> = [
   { value: "30d", label: "30 天" },
 ]
 
+const profitLines = [
+  { key: "sale_cny", label: "销售额", stroke: "var(--brand)" },
+  { key: "external_sales_cny", label: "对外销售额", stroke: "var(--chart-2)" },
+  { key: "cost_cny", label: "上游成本", stroke: "var(--warning)" },
+  { key: "profit_cny", label: "毛利润", stroke: "var(--success)" },
+  { key: "personal_usage_cny", label: "自用金额", stroke: "var(--danger)" },
+  { key: "operating_profit_cny", label: "经营利润", stroke: "var(--chart-3)" },
+] as const
+
+type ProfitLineKey = (typeof profitLines)[number]["key"]
+type ProfitLineVisibility = Record<ProfitLineKey, boolean>
+
 function formatTick(iso: string, range: ProfitTrendRange) {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
@@ -33,16 +45,17 @@ function formatYAxis(value: number) {
   return `¥${value.toFixed(value >= 10 ? 0 : 2)}`
 }
 
-function ProfitTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey: string; value: number }>; label?: string }) {
+function ProfitTooltip({ active, payload, label, visibleKeys }: { active?: boolean; payload?: Array<{ dataKey: string; value?: number }>; label?: string; visibleKeys: Set<ProfitLineKey> }) {
   if (!active || !payload?.length) return null
-  const labels: Record<string, string> = { sale_cny: "销售额", cost_cny: "成本", profit_cny: "利润" }
+  const visiblePayload = payload.filter((item) => visibleKeys.has(item.dataKey as ProfitLineKey) && typeof item.value === "number")
+  if (!visiblePayload.length) return null
   return (
     <div className="min-w-40 rounded-md border border-border bg-popover px-3 py-2 shadow-lg">
       <p className="text-xs text-muted-foreground">{label}</p>
       <div className="mt-1.5 space-y-1">
-        {payload.map((item) => (
+        {visiblePayload.map((item) => (
           <div key={item.dataKey} className="flex items-center justify-between gap-4 text-xs">
-            <span className="text-muted-foreground">{labels[item.dataKey] ?? item.dataKey}</span>
+            <span className="text-muted-foreground">{profitLines.find((line) => line.key === item.dataKey)?.label ?? item.dataKey}</span>
             <span className="font-mono font-medium tabular-nums text-foreground">{cny(item.value, { precise: true })}</span>
           </div>
         ))}
@@ -55,17 +68,37 @@ export function ProfitOverview() {
   const [range, setRange] = useState<ProfitTrendRange>("24h")
   const [detailKind, setDetailKind] = useState<ProfitDetailKind>("reconciliation")
   const [detailPage, setDetailPage] = useState(1)
+  const [visibleLines, setVisibleLines] = useState<ProfitLineVisibility>({
+    sale_cny: true,
+    external_sales_cny: true,
+    cost_cny: true,
+    profit_cny: true,
+    personal_usage_cny: true,
+    operating_profit_cny: true,
+  })
   const trend = useProfitTrend(range)
   const details = useProfitDetails(detailKind, range, detailPage, 25)
   const summary = trend.data?.summary
   const chartData = useMemo(
     () => (trend.data?.points ?? []).map((point) => ({
       ...point,
+      // Keep the dashboard usable while an older API response is still cached.
+      external_sales_cny: point.external_sales_cny ?? point.sale_cny - (point.personal_usage_cny ?? 0),
+      operating_profit_cny: point.operating_profit_cny ?? point.net_profit_cny ?? point.profit_cny,
       label: formatTick(point.start_at, range),
     })),
     [range, trend.data],
   )
-  const hasData = chartData.some((point) => point.sale_cny !== 0 || point.cost_cny !== 0)
+  const hasData = chartData.some((point) => profitLines.some((line) => point[line.key] !== 0))
+  const visibleLineKeys = useMemo(
+    () => new Set(profitLines.filter((line) => visibleLines[line.key]).map((line) => line.key)),
+    [visibleLines],
+  )
+  const allLinesHidden = visibleLineKeys.size === 0
+
+  function toggleLine(key: ProfitLineKey) {
+    setVisibleLines((current) => ({ ...current, [key]: !current[key] }))
+  }
 
   function changeDetailKind(value: string) {
     if (value !== "sales" && value !== "cost" && value !== "unmapped" && value !== "reconciliation") return
@@ -81,15 +114,22 @@ export function ProfitOverview() {
             <LineChartIcon className="size-4 text-brand" />
             {"收益结算"}
           </CardTitle>
-          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3 lg:grid-cols-7">
             <Metric label="销售额" value={cny(summary?.sale_cny)} />
-            <Metric label="成本" value={cny(summary?.cost_cny)} />
+            <Metric label="对外销售额" value={cny(summary?.external_sales_cny ?? summary?.sale_cny)} />
+            <Metric label="上游成本" value={cny(summary?.cost_cny)} />
             <Metric
-              label="利润"
+              label="毛利润"
               value={cny(summary?.profit_cny)}
               valueClass={summary && summary.profit_cny < 0 ? "text-danger" : "text-success"}
             />
-            <Metric label="利润率" value={summary ? `${(summary.profit_margin * 100).toFixed(1)}%` : "—"} />
+            <Metric label="自用金额" value={cny(summary?.personal_usage_cny)} valueClass="text-warning" />
+            <Metric
+              label="经营利润"
+              value={cny(summary?.operating_profit_cny ?? summary?.net_profit_cny ?? summary?.profit_cny)}
+              valueClass={summary && (summary.operating_profit_cny ?? summary.net_profit_cny ?? summary.profit_cny) < 0 ? "text-danger" : "text-success"}
+            />
+            <Metric label="毛利率" value={summary ? `${(summary.profit_margin * 100).toFixed(1)}%` : "—"} />
           </div>
         </div>
         <ToggleGroup
@@ -114,6 +154,8 @@ export function ProfitOverview() {
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{"加载中…"}</div>
           ) : trend.error ? (
             <div className="flex h-full items-center justify-center px-4 text-center text-xs text-danger">{trend.error}</div>
+          ) : allLinesHidden ? (
+            <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">{"所有线条已隐藏，可从下方图例重新启用"}</div>
           ) : !hasData ? (
             <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">{"暂无收益结算数据，等待账单同步"}</div>
           ) : (
@@ -122,20 +164,42 @@ export function ProfitOverview() {
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} dy={8} />
                 <YAxis tickLine={false} axisLine={false} width={52} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} tickFormatter={formatYAxis} />
-                <Tooltip content={<ProfitTooltip />} cursor={{ stroke: "var(--border)", strokeDasharray: "4 4" }} />
-                <Line type="monotone" dataKey="sale_cny" name="销售额" stroke="var(--brand)" strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="cost_cny" name="成本" stroke="var(--warning)" strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="profit_cny" name="利润" stroke="var(--success)" strokeWidth={2} dot={false} isAnimationActive={false} />
+                <Tooltip content={<ProfitTooltip visibleKeys={visibleLineKeys} />} cursor={{ stroke: "var(--border)", strokeDasharray: "4 4" }} />
+                {profitLines.map((line) => visibleLines[line.key] ? (
+                  <Line key={line.key} type="monotone" dataKey={line.key} name={line.label} stroke={line.stroke} strokeWidth={2} dot={false} isAnimationActive={false} />
+                ) : null)}
               </LineChart>
             </ResponsiveContainer>
           )}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border pt-3" role="group" aria-label="图表图例">
+          {profitLines.map((line) => {
+            const visible = visibleLines[line.key]
+            return (
+              <button
+                key={line.key}
+                type="button"
+                aria-pressed={visible}
+                aria-label={`${line.label}，${visible ? "已显示" : "已隐藏"}`}
+                onClick={() => toggleLine(line.key)}
+                className={cn(
+                  "inline-flex min-h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
+                  visible ? "border-border bg-background text-foreground" : "border-transparent bg-muted/50 text-muted-foreground line-through",
+                )}
+              >
+                <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: line.stroke }} aria-hidden="true" />
+                {line.label}
+              </button>
+            )
+          })}
         </div>
         {summary ? (
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5"><CircleDollarSign className="size-3.5 text-success" />{"已结算 "}{cny(summary.settled_sale_cny)}</span>
             {summary.unmapped_sale_cny > 0 ? <span className="inline-flex items-center gap-1.5 text-warning"><AlertCircle className="size-3.5" />{"未映射 "}{cny(summary.unmapped_sale_cny)}</span> : null}
             {summary.unsettled_sale_cny > 0 ? <span className="inline-flex items-center gap-1.5 text-warning">{"待补偿 "}{cny(summary.unsettled_sale_cny)}</span> : null}
-            {!summary.complete ? <span className={cn("text-warning")}>{"数据尚未完整"}</span> : null}
+            {!summary.complete ? <span className={cn("text-warning")}>{"毛利润数据尚未完整"}</span> : null}
+            {summary.personal_usage_cny !== undefined && !summary.personal_usage_complete ? <span className="text-warning">{"自用金额数据尚未完整"}</span> : null}
           </div>
         ) : null}
 
@@ -210,10 +274,13 @@ function ReconciliationDetail({ data, loading, error }: { data?: ProfitReconcili
   const empty = !data
   return (
     <DetailState loading={loading} error={error} empty={empty}>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
         <DetailMetric label="销售额" value={cny(data?.sales_cny, { precise: true })} />
+        <DetailMetric label="对外销售额" value={cny(data?.external_sales_cny ?? data?.sales_cny, { precise: true })} />
         <DetailMetric label="阶段成本" value={cny(data?.stage_usage_cost_cny, { precise: true })} />
-        <DetailMetric label="利润" value={cny(data?.profit_cny, { precise: true })} valueClass={data && data.profit_cny < 0 ? "text-danger" : "text-success"} />
+        <DetailMetric label="毛利润" value={cny(data?.profit_cny, { precise: true })} valueClass={data && data.profit_cny < 0 ? "text-danger" : "text-success"} />
+        <DetailMetric label="自用金额" value={cny(data?.personal_usage_cny, { precise: true })} valueClass="text-warning" />
+        <DetailMetric label="经营利润" value={cny(data?.operating_profit_cny ?? data?.net_profit_cny ?? data?.profit_cny, { precise: true })} valueClass={data && (data.operating_profit_cny ?? data.net_profit_cny ?? data.profit_cny) < 0 ? "text-danger" : "text-success"} />
         <DetailMetric label="对账差额" value={cny(data?.reconciliation_delta_cny, { precise: true })} />
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
@@ -222,7 +289,9 @@ function ReconciliationDetail({ data, loading, error }: { data?: ProfitReconcili
         <span>已分摊成本 {cny(data?.allocated_cost_cny, { precise: true })}</span>
         <span>未匹配成本 {cny(data?.unmatched_cost_cny, { precise: true })}</span>
         <span>未映射销售 {cny(data?.unmapped_sales_cny, { precise: true })}</span>
-        <Badge variant="outline" className={data?.complete ? "text-success" : "text-warning"}>{data?.complete ? "数据完整" : "待补齐"}</Badge>
+        <Badge variant="outline" className={data?.complete ? "text-success" : "text-warning"}>{data?.complete ? "毛利润完整" : "毛利润待补齐"}</Badge>
+        <Badge variant="outline" className={data?.personal_usage_complete ? "text-success" : "text-warning"}>{data?.personal_usage_complete ? "自用金额完整" : "自用金额待补齐"}</Badge>
+        <Badge variant="outline" className={data?.net_profit_complete ? "text-success" : "text-warning"}>{data?.net_profit_complete ? "经营利润完整" : "经营利润待补齐"}</Badge>
       </div>
     </DetailState>
   )
@@ -263,7 +332,7 @@ function SalesDetailTable({ data, loading, error, unmapped = false }: { data: Pr
                 </TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{cny(item.cost_cny, { precise: true })}</TableCell>
                 <TableCell className="text-right font-mono font-medium tabular-nums">{cny(item.sale_cny, { precise: true })}</TableCell>
-                <TableCell className={cn("text-right font-mono font-medium tabular-nums", item.profit_cny < 0 ? "text-danger" : "text-success")}>{cny(item.profit_cny, { precise: true })}</TableCell>
+                <TableCell className={cn("text-right font-mono font-medium tabular-nums", (item.profit_cny ?? 0) < 0 ? "text-danger" : "text-success")}>{cny(item.profit_cny, { precise: true })}</TableCell>
                 <TableCell>
                   <MappingBadge status={item.mapping_status} forcedUnmapped={unmapped} />
                 </TableCell>

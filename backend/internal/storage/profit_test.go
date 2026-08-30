@@ -3,6 +3,8 @@ package storage
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildProfitBucketsSplitsSharedUpstreamCostByNormalizedConsumption(t *testing.T) {
@@ -202,5 +204,200 @@ func TestSummarizeProfitWithUsageIncludesAllUpstreamCost(t *testing.T) {
 	summary := SummarizeProfitWithUsage(profits, usage, start, end, 300, 1)
 	if summary.CostCNY != 5 || summary.ProfitCNY != -4 || summary.UnmatchedCostCNY != 3 {
 		t.Fatalf("summary = %#v, want cost=5 profit=-4 unmatched=3", summary)
+	}
+}
+
+func TestBuildPersonalUsageBucketConvertsNetQuotaToCNY(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	bucket, err := BuildNewAPIPersonalUsageBucket(PersonalUsageFactInput{
+		BucketStart: start, BucketEnd: start.Add(5 * time.Minute), ConsumeQuota: 900000,
+		RefundQuota: 100000, EventCount: 4, QuotaPerUnit: 500000, Complete: true,
+	}, 10, start)
+	if err != nil {
+		t.Fatalf("BuildNewAPIPersonalUsageBucket returned error: %v", err)
+	}
+	if bucket.NetQuota != 800000 || bucket.PersonalUsageCNY != 0.16 || !bucket.Complete {
+		t.Fatalf("personal usage bucket = %#v, want net=800000 cny=0.16 complete", bucket)
+	}
+}
+
+func TestSummarizeProfitWithPersonalUsageExposesExternalSalesAndOperatingProfit(t *testing.T) {
+	t.Helper()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	profits := []ProfitBucket{{SaleCNY: 10, CostCNY: 4, ProfitCNY: 6, Complete: true, AllocationStatus: ProfitAllocationSettled}}
+	usage := []UsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, ChannelID: 1, Amount: 4, Currency: "USD", Complete: true}}
+	personal := []NewAPIPersonalUsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, PersonalUsageCNY: 2, Complete: true}}
+	summary := SummarizeProfitWithPersonalUsage(profits, usage, personal, start, end, 3600, 1, true)
+	require.Equal(t, 6.0, summary.ProfitCNY)
+	require.Equal(t, 2.0, summary.PersonalUsageCNY)
+	require.Equal(t, 8.0, summary.ExternalSalesCNY)
+	require.Equal(t, 4.0, summary.OperatingProfitCNY)
+	require.True(t, summary.NetProfitComplete)
+}
+
+func TestSummarizeProfitWithPersonalUsageCalculatesNetProfit(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	profits := []ProfitBucket{{SaleCNY: 10, CostCNY: 4, ProfitCNY: 6, Complete: true, AllocationStatus: ProfitAllocationSettled}}
+	usage := []UsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, ChannelID: 1, Amount: 4, Currency: "USD", Complete: true}}
+	personal := []NewAPIPersonalUsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, PersonalUsageCNY: 2, Complete: true}}
+	summary := SummarizeProfitWithPersonalUsage(profits, usage, personal, start, end, 3600, 1, true)
+	if summary.ProfitCNY != 6 || summary.PersonalUsageCNY != 2 || summary.NetProfitCNY != 4 || !summary.NetProfitComplete {
+		t.Fatalf("summary = %#v, want gross=6 personal=2 net=4 complete", summary)
+	}
+}
+
+func TestSummarizeProfitWithPersonalUsagePreservesProfitBucketCostWithoutUsageLedger(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	profits := []ProfitBucket{{SaleCNY: 10, CostCNY: 4, ProfitCNY: 6, Complete: true, AllocationStatus: ProfitAllocationSettled}}
+	personal := []NewAPIPersonalUsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, PersonalUsageCNY: 2, Complete: true}}
+
+	summary := SummarizeProfitWithPersonalUsage(profits, nil, personal, start, end, 3600, 1, true)
+	if summary.CostCNY != 4 || summary.ProfitCNY != 6 || summary.ExternalSalesCNY != 8 || summary.OperatingProfitCNY != 4 {
+		t.Fatalf("summary = %#v, want cost=4 gross=6 external=8 operating=4", summary)
+	}
+}
+
+func TestBuildProfitTrendWithPersonalUsagePreservesProfitBucketCostWithoutUsageLedger(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	profits := []ProfitBucket{{BucketStart: start, BucketEnd: end, SaleCNY: 10, CostCNY: 4, ProfitCNY: 6, Complete: true}}
+	personal := []NewAPIPersonalUsageBucket{{BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600, PersonalUsageCNY: 2, Complete: true}}
+
+	points := BuildProfitTrendWithPersonalUsage(profits, nil, personal, spec, time.UTC, 1)
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	point := points[0]
+	if point.CostCNY != 4 || point.ProfitCNY != 6 || point.ExternalSalesCNY != 8 || point.OperatingProfitCNY != 4 {
+		t.Fatalf("point = %#v, want cost=4 gross=6 external=8 operating=4", point)
+	}
+}
+
+func TestBuildProfitTrendWithPersonalUsageShowsPersonalOnlyBucket(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	personal := []NewAPIPersonalUsageBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		PersonalUsageCNY: 3, Complete: true,
+	}}
+
+	points := BuildProfitTrendWithPersonalUsage(nil, nil, personal, spec, time.UTC, 1)
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	point := points[0]
+	if point.PersonalUsageCNY != 3 || point.ExternalSalesCNY != -3 || point.OperatingProfitCNY != -3 || point.NetProfitCNY != -3 || !point.HasData {
+		t.Fatalf("personal-only point = %#v, want personal=3 external sales=-3 operating profit=-3 with data", point)
+	}
+	if !point.PersonalUsageComplete || point.NetProfitComplete {
+		t.Fatalf("personal-only completeness = %#v, want personal complete and net incomplete without gross facts", point)
+	}
+}
+
+func TestBuildProfitTrendWithPersonalUsageMarksMissingBucketsIncomplete(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	personal := []NewAPIPersonalUsageBucket{{
+		BucketStart: start, BucketEnd: start.Add(time.Hour), ResolutionSeconds: 3600,
+		PersonalUsageCNY: 1, Complete: true,
+	}}
+
+	points := BuildProfitTrendWithPersonalUsage(nil, nil, personal, spec, time.UTC, 1)
+	if len(points) != 2 {
+		t.Fatalf("points = %d, want 2", len(points))
+	}
+	if !points[0].PersonalUsageComplete || points[1].PersonalUsageComplete {
+		t.Fatalf("personal completeness = %v/%v, want true/false", points[0].PersonalUsageComplete, points[1].PersonalUsageComplete)
+	}
+}
+
+func TestBuildProfitTrendWithUsagePropagatesCostCompletenessToNetProfit(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	profits := []ProfitBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		SaleCNY: 10, ProfitCNY: 6, Complete: true,
+	}}
+	usage := []UsageBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		ChannelID: 1, Amount: 4, Currency: "USD", Complete: false,
+	}}
+
+	points := BuildProfitTrendWithUsage(profits, usage, spec, time.UTC, 1)
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	point := points[0]
+	if point.Complete {
+		t.Fatalf("gross completeness = true, want false for incomplete cost bucket")
+	}
+	if point.NetProfitComplete {
+		t.Fatalf("net completeness = true, want false when cost completeness is false")
+	}
+}
+
+func TestBuildProfitTrendWithPersonalUsageKeepsGrossCompletenessIndependent(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	profits := []ProfitBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		SaleCNY: 10, ProfitCNY: 6, Complete: true,
+	}}
+	usage := []UsageBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		ChannelID: 1, Amount: 4, Currency: "USD", Complete: true,
+	}}
+	personal := []NewAPIPersonalUsageBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		PersonalUsageCNY: 2, Complete: false,
+	}}
+
+	points := BuildProfitTrendWithPersonalUsage(profits, usage, personal, spec, time.UTC, 1)
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	point := points[0]
+	if !point.Complete {
+		t.Fatalf("gross completeness = false, want true even when personal usage is incomplete")
+	}
+	if point.PersonalUsageComplete {
+		t.Fatalf("personal completeness = true, want false")
+	}
+	if point.NetProfitComplete {
+		t.Fatalf("net completeness = true, want false when personal usage is incomplete")
+	}
+}
+
+func TestBuildProfitTrendWithPersonalUsageAcceptsExplicitCompleteZeroSource(t *testing.T) {
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	spec := ProfitTrendSpec{StartAt: start, EndAt: end, UsageResolutionSeconds: 3600, OutputResolutionSeconds: 3600}
+	profits := []ProfitBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		SaleCNY: 10, ProfitCNY: 6, Complete: true,
+	}}
+	usage := []UsageBucket{{
+		BucketStart: start, BucketEnd: end, ResolutionSeconds: 3600,
+		ChannelID: 1, Amount: 4, Currency: "USD", Complete: true,
+	}}
+
+	points := BuildProfitTrendWithPersonalUsageStatus(profits, usage, nil, spec, time.UTC, 1, true)
+	if len(points) != 1 {
+		t.Fatalf("points = %d, want 1", len(points))
+	}
+	point := points[0]
+	if point.PersonalUsageCNY != 0 || point.ExternalSalesCNY != 10 || point.OperatingProfitCNY != 6 || point.NetProfitCNY != 6 {
+		t.Fatalf("zero personal-use point = %#v, want personal=0 external=10 operating=6 net=6", point)
+	}
+	if !point.PersonalUsageComplete || !point.NetProfitComplete {
+		t.Fatalf("zero personal-use completeness = %#v, want both complete", point)
 	}
 }

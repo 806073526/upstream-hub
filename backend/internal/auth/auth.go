@@ -21,10 +21,10 @@ import (
 
 // Service 单管理员登录服务。
 type Service struct {
-	username  string
-	password  string
-	secret    []byte
-	tokenTTL  time.Duration
+	username string
+	password string
+	secret   []byte
+	tokenTTL time.Duration
 }
 
 // New 构造 Service。secret 推荐 32 字节以上；若为空报错。
@@ -128,9 +128,9 @@ func (s *Service) TokenTTL() time.Duration { return s.tokenTTL }
 //   - "/api/auth/login"
 func (s *Service) Middleware() gin.HandlerFunc {
 	whitelist := map[string]struct{}{
-		"/healthz":         {},
-		"/api/version":     {},
-		"/api/auth/login":  {},
+		"/healthz":        {},
+		"/api/version":    {},
+		"/api/auth/login": {},
 	}
 	return func(c *gin.Context) {
 		if _, ok := whitelist[c.FullPath()]; ok {

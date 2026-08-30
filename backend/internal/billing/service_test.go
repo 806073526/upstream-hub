@@ -18,6 +18,18 @@ type fakeAggregateClient struct {
 	err      error
 }
 
+type setupAggregateClient struct {
+	*fakeAggregateClient
+	setup      newapi.Setup
+	setupErr   error
+	setupCalls int
+}
+
+func (f *setupAggregateClient) FetchSetup(_ context.Context) (newapi.Setup, error) {
+	f.setupCalls++
+	return f.setup, f.setupErr
+}
+
 type legacyDetailClient struct {
 	*fakeAggregateClient
 	details     newapi.BillingDetails
@@ -143,6 +155,7 @@ func (f *fakeBillingRepository) CreditRatesByFactKeys(factKeys []string) (map[st
 
 func (f *fakeBillingRepository) SaveSyncState(state storage.BillingSyncState) error {
 	f.savedStates = append(f.savedStates, state)
+	f.state = state
 	return nil
 }
 
@@ -157,7 +170,7 @@ func TestServiceSyncUsesDelayedOverlappingWindowAndSnapshotsSale(t *testing.T) {
 		}},
 	}}
 	previousEnd := now.Add(-time.Hour)
-	repo := &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &previousEnd, Status: "success"}}
+	repo := &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &previousEnd, InitialSyncCompletedAt: &previousEnd, Status: "success"}}
 	service := NewService(client, repo, config.BillingConfig{
 		Enabled: true, SettlementDelayMinutes: 15, OverlapMinutes: 30, InitialLookbackHours: 24, CreditUSDPerCNY: 12,
 	}, nowFunc(now))
@@ -225,6 +238,36 @@ func TestServiceSyncFallsBackToAggregateWhenDetailsEndpointIsUnsupported(t *test
 	}
 	if repo.atomicCalls != 1 {
 		t.Fatalf("atomic commit calls = %d, want 1", repo.atomicCalls)
+	}
+}
+
+func TestServiceSyncCheckpointsInitialWindowWhenDetailsTimesOut(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	start := end.Add(-240 * time.Hour)
+	client := &legacyDetailClient{
+		fakeAggregateClient: &fakeAggregateClient{result: newapi.BillingAggregate{
+			Source: "new-api", BucketSeconds: 300, QuotaPerUnit: 500000, Complete: true,
+		}},
+		detailErr: context.DeadlineExceeded,
+	}
+	repo := &fakeBillingRepository{}
+	service := NewService(client, repo, config.BillingConfig{
+		SettlementDelayMinutes: 15, InitialLookbackHours: 240, CreditUSDPerCNY: 12,
+	}, nowFunc(now))
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	firstWindowEnd := start.Add(24 * time.Hour)
+	if client.detailCalls != 1 {
+		t.Fatalf("detail calls = %d, want 1", client.detailCalls)
+	}
+	if repo.atomicCalls != 1 || !repo.replaceStart.Equal(start) || !repo.replaceEnd.Equal(firstWindowEnd) {
+		t.Fatalf("commit = calls:%d window:[%v,%v], want [%v,%v]", repo.atomicCalls, repo.replaceStart, repo.replaceEnd, start, firstWindowEnd)
+	}
+	if repo.state.Status != "running" || repo.state.LastSuccessfulEndAt == nil || !repo.state.LastSuccessfulEndAt.Equal(firstWindowEnd) {
+		t.Fatalf("checkpoint state = %#v", repo.state)
 	}
 }
 
@@ -316,7 +359,7 @@ func TestServiceSyncDoesNotAdvanceWatermarkWhenSourceFails(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
 	client := &fakeAggregateClient{err: errors.New("source unavailable")}
 	end := now.Add(-time.Hour)
-	repo := &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &end, Status: "success"}}
+	repo := &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &end, InitialSyncCompletedAt: &end, Status: "success"}}
 	service := NewService(client, repo, config.BillingConfig{
 		SettlementDelayMinutes: 15, OverlapMinutes: 30, InitialLookbackHours: 24, CreditUSDPerCNY: 12,
 	}, nowFunc(now))
@@ -341,10 +384,11 @@ func TestServiceSyncDoesNotAdvanceWatermarkWhenAtomicCommitFails(t *testing.T) {
 	previousSuccess := now.Add(-2 * time.Hour)
 	repo := &fakeBillingRepository{
 		state: storage.BillingSyncState{
-			Source:              billingSource,
-			LastSuccessfulEndAt: &previousEnd,
-			LastSuccessAt:       &previousSuccess,
-			Status:              "success",
+			Source:                 billingSource,
+			LastSuccessfulEndAt:    &previousEnd,
+			InitialSyncCompletedAt: &previousSuccess,
+			LastSuccessAt:          &previousSuccess,
+			Status:                 "success",
 		},
 		err: errors.New("database write failed"),
 	}
@@ -465,6 +509,143 @@ func TestServiceRebuildSplitsRequestsAtNewAPIMaximumRange(t *testing.T) {
 	}
 }
 
+func TestServiceSyncCheckpointsConfiguredInitialLookbackByDay(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 17, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	start := end.Add(-48 * time.Hour)
+	client := &fakeAggregateClient{result: newapi.BillingAggregate{QuotaPerUnit: 500000, Complete: true}}
+	repo := &fakeBillingRepository{}
+	service := NewService(client, repo, config.BillingConfig{
+		SettlementDelayMinutes: 15, InitialLookbackHours: 48, CreditUSDPerCNY: 12,
+	}, nowFunc(now))
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	firstEnd := start.Add(24 * time.Hour)
+	if len(client.requests) != 1 {
+		t.Fatalf("aggregate requests = %#v, want one initial checkpoint", client.requests)
+	}
+	if client.requests[0] != (newapi.BillingAggregateRequest{StartAt: start.Unix(), EndAt: firstEnd.Unix(), BucketSeconds: storage.BillingResolutionSeconds}) {
+		t.Fatalf("first aggregate request = %#v", client.requests[0])
+	}
+	if repo.state.Status != "running" || repo.state.InitialSyncCompletedAt != nil {
+		t.Fatalf("first checkpoint state = %#v", repo.state)
+	}
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("second Sync returned error: %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("aggregate requests = %#v, want two checkpoints", client.requests)
+	}
+	if client.requests[1] != (newapi.BillingAggregateRequest{StartAt: firstEnd.Unix(), EndAt: end.Unix(), BucketSeconds: storage.BillingResolutionSeconds}) {
+		t.Fatalf("second aggregate request = %#v", client.requests[1])
+	}
+	if repo.atomicCalls != 2 || !repo.replaceStart.Equal(firstEnd) || !repo.replaceEnd.Equal(end) {
+		t.Fatalf("commit = calls:%d window:[%v,%v]", repo.atomicCalls, repo.replaceStart, repo.replaceEnd)
+	}
+	if repo.state.Status != "success" || repo.state.InitialSyncCompletedAt == nil {
+		t.Fatalf("final checkpoint state = %#v", repo.state)
+	}
+}
+
+func TestServiceSyncUsesNewAPISetupInitializationTimeForInitialSync(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 17, 0, 0, time.UTC)
+	initializedAt := time.Date(2026, 8, 17, 3, 17, 0, 0, time.UTC)
+	client := &setupAggregateClient{
+		fakeAggregateClient: &fakeAggregateClient{result: newapi.BillingAggregate{QuotaPerUnit: 500000, Complete: true}},
+		setup:               newapi.Setup{InitializedAt: initializedAt.Unix()},
+	}
+	repo := &fakeBillingRepository{}
+	service := NewService(client, repo, config.BillingConfig{
+		SettlementDelayMinutes: 15, InitialLookbackHours: 24, CreditUSDPerCNY: 12,
+	}, nowFunc(now))
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	wantStart := initializedAt.Truncate(time.Duration(storage.BillingResolutionSeconds) * time.Second)
+	wantWindowEnd := wantStart.Add(billingSyncWindow)
+	if client.setupCalls != 1 {
+		t.Fatalf("setup calls = %d, want 1", client.setupCalls)
+	}
+	if client.requests[0].StartAt != wantStart.Unix() || client.requests[0].EndAt != wantWindowEnd.Unix() {
+		t.Fatalf("aggregate request = %#v, want start=%d end=%d", client.requests[0], wantStart.Unix(), wantWindowEnd.Unix())
+	}
+	if !repo.replaceStart.Equal(wantStart) || !repo.replaceEnd.Equal(wantWindowEnd) {
+		t.Fatalf("committed window = [%v,%v], want [%v,%v]", repo.replaceStart, repo.replaceEnd, wantStart, wantWindowEnd)
+	}
+	if repo.state.Status != "running" || repo.state.InitialSyncCompletedAt != nil {
+		t.Fatalf("initial sync state = %#v, want running checkpoint", repo.state)
+	}
+}
+
+func TestServiceSyncBackfillsExistingWatermarkFromNewAPISetupInitializationTime(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 17, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	initializedAt := end.Add(-30 * time.Hour)
+	previousEnd := end.Add(-time.Hour)
+	client := &setupAggregateClient{
+		fakeAggregateClient: &fakeAggregateClient{result: newapi.BillingAggregate{QuotaPerUnit: 500000, Complete: true}},
+		setup:               newapi.Setup{InitializedAt: initializedAt.Unix()},
+	}
+	repo := &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &previousEnd, Status: "success"}}
+	service := NewService(client, repo, config.BillingConfig{
+		SettlementDelayMinutes: 15, OverlapMinutes: 30, InitialLookbackHours: 24, CreditUSDPerCNY: 12,
+	}, nowFunc(now))
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("initial backfill returned error: %v", err)
+	}
+	wantStart := initializedAt.Truncate(time.Duration(storage.BillingResolutionSeconds) * time.Second)
+	wantFirstEnd := wantStart.Add(billingSyncWindow)
+	if client.requests[0].StartAt != wantStart.Unix() || client.requests[0].EndAt != wantFirstEnd.Unix() {
+		t.Fatalf("backfill request = %#v, want start=%d end=%d", client.requests[0], wantStart.Unix(), wantFirstEnd.Unix())
+	}
+	if repo.state.InitialSyncCompletedAt != nil || repo.state.Status != "running" {
+		t.Fatalf("initial sync checkpoint = %#v, want running", repo.state)
+	}
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("incremental sync returned error: %v", err)
+	}
+	if len(client.requests) != 2 || client.requests[1].StartAt != wantFirstEnd.Unix() || client.requests[1].EndAt != end.Unix() {
+		t.Fatalf("incremental request = %#v, want start=%d end=%d", client.requests, wantFirstEnd.Unix(), end.Unix())
+	}
+	if repo.state.InitialSyncCompletedAt == nil || repo.state.Status != "success" {
+		t.Fatalf("final checkpoint = %#v, want success", repo.state)
+	}
+	if client.setupCalls != 1 {
+		t.Fatalf("setup calls = %d, want one setup call", client.setupCalls)
+	}
+}
+
+func TestServiceSyncFallsBackToConfiguredLookbackWhenSetupUnavailable(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 17, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	client := &setupAggregateClient{
+		fakeAggregateClient: &fakeAggregateClient{result: newapi.BillingAggregate{QuotaPerUnit: 500000, Complete: true}},
+		setupErr:            errors.New("new-api setup: status 404"),
+	}
+	repo := &fakeBillingRepository{}
+	service := NewService(client, repo, config.BillingConfig{
+		SettlementDelayMinutes: 15, InitialLookbackHours: 48, CreditUSDPerCNY: 12,
+	}, nowFunc(now))
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	wantStart := end.Add(-48 * time.Hour)
+	wantWindowEnd := wantStart.Add(billingSyncWindow)
+	if client.setupCalls != 1 {
+		t.Fatalf("setup calls = %d, want 1", client.setupCalls)
+	}
+	if client.requests[0].StartAt != wantStart.Unix() || client.requests[0].EndAt != wantWindowEnd.Unix() {
+		t.Fatalf("aggregate request = %#v, want start=%d end=%d", client.requests[0], wantStart.Unix(), wantWindowEnd.Unix())
+	}
+}
+
 func TestBuildMappingInputsRecordsMappedAmbiguousAndUnmappedChannels(t *testing.T) {
 	items := buildMappingInputs(
 		[]newapi.Identity{{ChannelID: 2}, {ChannelID: 1}, {ChannelID: 3}},
@@ -494,7 +675,7 @@ func TestServiceSyncDoesNotAdvanceWatermarkWhenSettlementFails(t *testing.T) {
 	previousEnd := now.Add(-time.Hour)
 	settleErr := errors.New("usage query failed")
 	repo := &settlingBillingRepository{
-		fakeBillingRepository: &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &previousEnd}},
+		fakeBillingRepository: &fakeBillingRepository{state: storage.BillingSyncState{Source: billingSource, LastSuccessfulEndAt: &previousEnd, InitialSyncCompletedAt: &previousEnd}},
 		settleErr:             settleErr,
 	}
 	service := NewService(client, repo, config.BillingConfig{

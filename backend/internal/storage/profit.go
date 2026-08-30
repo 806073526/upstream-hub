@@ -393,23 +393,33 @@ type ProfitSummary struct {
 	SaleCNY float64 `json:"sale_cny"`
 	// CostCNY is the complete upstream usage cost for the requested period,
 	// independent of whether a NewAPI sale could be mapped to an account.
-	CostCNY             float64 `json:"cost_cny"`
-	CostUSD             float64 `json:"cost_usd"`
-	ProfitCNY           float64 `json:"profit_cny"`
-	ProfitMargin        float64 `json:"profit_margin"`
-	AllocatedCostCNY    float64 `json:"allocated_cost_cny"`
-	UnmatchedCostCNY    float64 `json:"unmatched_cost_cny"`
-	StageUsageCostCNY   float64 `json:"stage_usage_cost_cny"`
-	SalesDetailCNY      float64 `json:"sales_detail_cny"`
-	CostDetailCNY       float64 `json:"cost_detail_cny"`
-	ReconciliationDelta float64 `json:"reconciliation_delta_cny"`
-	SettledSaleCNY      float64 `json:"settled_sale_cny"`
-	UnmappedSaleCNY     float64 `json:"unmapped_sale_cny"`
-	UnsettledSaleCNY    float64 `json:"unsettled_sale_cny"`
-	BucketCount         int64   `json:"bucket_count"`
-	SettledBucketCount  int64   `json:"settled_bucket_count"`
-	UnmappedBucketCount int64   `json:"unmapped_bucket_count"`
-	Complete            bool    `json:"complete"`
+	CostCNY float64 `json:"cost_cny"`
+	CostUSD float64 `json:"cost_usd"`
+	// ProfitCNY remains the gross profit for compatibility with existing API
+	// consumers. OperatingProfitCNY excludes Root-user personal usage from sales
+	// before subtracting upstream cost. NetProfitCNY is retained as its legacy
+	// compatibility alias.
+	ProfitCNY             float64 `json:"profit_cny"`
+	PersonalUsageCNY      float64 `json:"personal_usage_cny"`
+	ExternalSalesCNY      float64 `json:"external_sales_cny"`
+	OperatingProfitCNY    float64 `json:"operating_profit_cny"`
+	NetProfitCNY          float64 `json:"net_profit_cny"`
+	PersonalUsageComplete bool    `json:"personal_usage_complete"`
+	NetProfitComplete     bool    `json:"net_profit_complete"`
+	ProfitMargin          float64 `json:"profit_margin"`
+	AllocatedCostCNY      float64 `json:"allocated_cost_cny"`
+	UnmatchedCostCNY      float64 `json:"unmatched_cost_cny"`
+	StageUsageCostCNY     float64 `json:"stage_usage_cost_cny"`
+	SalesDetailCNY        float64 `json:"sales_detail_cny"`
+	CostDetailCNY         float64 `json:"cost_detail_cny"`
+	ReconciliationDelta   float64 `json:"reconciliation_delta_cny"`
+	SettledSaleCNY        float64 `json:"settled_sale_cny"`
+	UnmappedSaleCNY       float64 `json:"unmapped_sale_cny"`
+	UnsettledSaleCNY      float64 `json:"unsettled_sale_cny"`
+	BucketCount           int64   `json:"bucket_count"`
+	SettledBucketCount    int64   `json:"settled_bucket_count"`
+	UnmappedBucketCount   int64   `json:"unmapped_bucket_count"`
+	Complete              bool    `json:"complete"`
 }
 
 func SummarizeProfit(profits []ProfitBucket) ProfitSummary {
@@ -444,12 +454,18 @@ func SummarizeProfit(profits []ProfitBucket) ProfitSummary {
 	summary.CostDetailCNY = summary.CostCNY
 	summary.ReconciliationDelta = roundProfitAmount(summary.SaleCNY - summary.CostCNY - summary.ProfitCNY)
 	summary.ProfitCNY = roundProfitAmount(summary.ProfitCNY)
+	summary.ExternalSalesCNY = summary.SaleCNY
+	summary.OperatingProfitCNY = summary.ProfitCNY
+	summary.NetProfitCNY = summary.OperatingProfitCNY
 	summary.SettledSaleCNY = roundProfitAmount(summary.SettledSaleCNY)
 	summary.UnmappedSaleCNY = roundProfitAmount(summary.UnmappedSaleCNY)
 	summary.UnsettledSaleCNY = roundProfitAmount(summary.UnsettledSaleCNY)
 	if summary.SaleCNY != 0 {
 		summary.ProfitMargin = roundProfitAmount(summary.ProfitCNY / summary.SaleCNY)
 	}
+	// A summary built without the personal-use ledger can still expose the
+	// historical gross value, but must not claim that net profit is complete.
+	summary.NetProfitComplete = false
 	return summary
 }
 
@@ -473,10 +489,124 @@ func SummarizeProfitWithUsage(profits []ProfitBucket, usage []UsageBucket, start
 	if summary.SaleCNY != 0 {
 		summary.ProfitMargin = roundProfitAmount(summary.ProfitCNY / summary.SaleCNY)
 	}
+	summary.ExternalSalesCNY = summary.SaleCNY
+	summary.OperatingProfitCNY = roundProfitAmount(summary.ExternalSalesCNY - summary.CostCNY)
+	summary.NetProfitCNY = summary.OperatingProfitCNY
+	summary.NetProfitComplete = false
 	if len(usage) == 0 || !complete || !currencyOK {
 		summary.Complete = false
 	}
 	return summary
+}
+
+// SummarizeProfitWithPersonalUsage combines the two independent cost
+// dimensions. ProfitCNY is intentionally kept as gross profit; NetProfitCNY
+// is the operating result after deducting Root-user consumption.
+// personalUsageComplete is supplied by the source adapter because an empty
+// complete response means zero use, while an unavailable response also has no
+// rows.
+func SummarizeProfitWithPersonalUsage(profits []ProfitBucket, usage []UsageBucket, personal []NewAPIPersonalUsageBucket, start, end time.Time, resolutionSeconds int, upstreamCostCNYPerUSD float64, personalUsageComplete bool) ProfitSummary {
+	// A nil usage slice means the optional upstream usage reader is unavailable.
+	// In that case retain the cost already stored on each profit bucket instead
+	// of replacing it with an empty-ledger zero. A non-nil slice still follows
+	// the independent usage ledger so missing rows remain visible as incomplete.
+	summary := SummarizeProfit(profits)
+	if usage != nil {
+		summary = SummarizeProfitWithUsage(profits, usage, start, end, resolutionSeconds, upstreamCostCNYPerUSD)
+	}
+	personalCNY, coverageComplete := SumPersonalUsageCNY(personal, start, end, resolutionSeconds)
+	if len(personal) == 0 {
+		// The source-level flag is the only way to distinguish an explicit zero
+		// response from a missing optional ledger.
+		coverageComplete = true
+	}
+	summary.PersonalUsageCNY = roundProfitAmount(personalCNY)
+	summary.PersonalUsageComplete = personalUsageComplete && coverageComplete
+	summary.ExternalSalesCNY = roundProfitAmount(summary.SaleCNY - summary.PersonalUsageCNY)
+	summary.OperatingProfitCNY = roundProfitAmount(summary.ExternalSalesCNY - summary.CostCNY)
+	summary.NetProfitCNY = summary.OperatingProfitCNY
+	summary.NetProfitComplete = summary.Complete && summary.PersonalUsageComplete
+	return summary
+}
+
+// SumPersonalUsageCNY sums Root-user usage over [start, end). Buckets may be
+// stored at different resolutions after a rebuild; each interval uses the
+// finest covering bucket so overlapping snapshots are never double-counted.
+// The bool reports whether the requested interval was fully covered by
+// complete buckets. An empty slice therefore returns (0, false); callers that
+// have an explicit source-level complete flag can treat it as a complete zero.
+func SumPersonalUsageCNY(personal []NewAPIPersonalUsageBucket, start, end time.Time, _ int) (float64, bool) {
+	if !end.After(start) {
+		return 0, false
+	}
+	start = start.UTC()
+	end = end.UTC()
+	candidates := make([]NewAPIPersonalUsageBucket, 0, len(personal))
+	boundaries := []time.Time{start, end}
+	for _, bucket := range personal {
+		if bucket.BucketStart.IsZero() || !bucket.BucketEnd.After(bucket.BucketStart) {
+			continue
+		}
+		bucketStart := bucket.BucketStart.UTC()
+		bucketEnd := bucket.BucketEnd.UTC()
+		overlapStart := maxTime(start, bucketStart)
+		overlapEnd := minTime(end, bucketEnd)
+		if !overlapEnd.After(overlapStart) {
+			continue
+		}
+		candidates = append(candidates, bucket)
+		boundaries = append(boundaries, overlapStart, overlapEnd)
+	}
+	if len(candidates) == 0 {
+		return 0, false
+	}
+	sort.Slice(boundaries, func(i, j int) bool { return boundaries[i].Before(boundaries[j]) })
+	unique := boundaries[:0]
+	for _, boundary := range boundaries {
+		if len(unique) == 0 || !boundary.Equal(unique[len(unique)-1]) {
+			unique = append(unique, boundary)
+		}
+	}
+	var total float64
+	complete := true
+	for i := 0; i+1 < len(unique); i++ {
+		segmentStart, segmentEnd := unique[i], unique[i+1]
+		if !segmentEnd.After(segmentStart) {
+			continue
+		}
+		selected := -1
+		for j, bucket := range candidates {
+			if bucket.BucketStart.After(segmentStart) || bucket.BucketEnd.Before(segmentEnd) {
+				continue
+			}
+			if selected < 0 || preferredPersonalUsageBucket(bucket, candidates[selected]) {
+				selected = j
+			}
+		}
+		if selected < 0 {
+			complete = false
+			continue
+		}
+		bucket := candidates[selected]
+		if !bucket.Complete {
+			complete = false
+		}
+		fraction := segmentEnd.Sub(segmentStart).Seconds() / bucket.BucketEnd.Sub(bucket.BucketStart).Seconds()
+		total += bucket.PersonalUsageCNY * fraction
+	}
+	return roundProfitAmount(total), complete
+}
+
+func preferredPersonalUsageBucket(candidate, current NewAPIPersonalUsageBucket) bool {
+	candidateDuration := candidate.BucketEnd.Sub(candidate.BucketStart)
+	currentDuration := current.BucketEnd.Sub(current.BucketStart)
+	if candidateDuration != currentDuration {
+		return candidateDuration < currentDuration
+	}
+	if candidate.Complete != current.Complete {
+		return candidate.Complete
+	}
+	return candidate.ID < current.ID
 }
 
 // SumUpstreamUsageCost returns the complete upstream cost for a period. When
@@ -565,16 +695,22 @@ type ProfitTrendSpec struct {
 }
 
 type ProfitTrendPoint struct {
-	StartAt          time.Time `json:"start_at"`
-	EndAt            time.Time `json:"end_at"`
-	SaleCNY          float64   `json:"sale_cny"`
-	CostCNY          float64   `json:"cost_cny"`
-	ProfitCNY        float64   `json:"profit_cny"`
-	SettledSaleCNY   float64   `json:"settled_sale_cny"`
-	UnmappedSaleCNY  float64   `json:"unmapped_sale_cny"`
-	UnsettledSaleCNY float64   `json:"unsettled_sale_cny"`
-	Complete         bool      `json:"complete"`
-	HasData          bool      `json:"-"`
+	StartAt               time.Time `json:"start_at"`
+	EndAt                 time.Time `json:"end_at"`
+	SaleCNY               float64   `json:"sale_cny"`
+	CostCNY               float64   `json:"cost_cny"`
+	ProfitCNY             float64   `json:"profit_cny"`
+	PersonalUsageCNY      float64   `json:"personal_usage_cny"`
+	ExternalSalesCNY      float64   `json:"external_sales_cny"`
+	OperatingProfitCNY    float64   `json:"operating_profit_cny"`
+	NetProfitCNY          float64   `json:"net_profit_cny"`
+	PersonalUsageComplete bool      `json:"personal_usage_complete"`
+	NetProfitComplete     bool      `json:"net_profit_complete"`
+	SettledSaleCNY        float64   `json:"settled_sale_cny"`
+	UnmappedSaleCNY       float64   `json:"unmapped_sale_cny"`
+	UnsettledSaleCNY      float64   `json:"unsettled_sale_cny"`
+	Complete              bool      `json:"complete"`
+	HasData               bool      `json:"-"`
 }
 
 func ResolveProfitTrendSpec(rangeID string, now time.Time, location *time.Location) (ProfitTrendSpec, error) {
@@ -675,6 +811,10 @@ func BuildProfitTrend(profits []ProfitBucket, spec ProfitTrendSpec, location *ti
 		point.SaleCNY = roundProfitAmount(point.SaleCNY)
 		point.CostCNY = roundProfitAmount(point.CostCNY)
 		point.ProfitCNY = roundProfitAmount(point.ProfitCNY)
+		point.ExternalSalesCNY = point.SaleCNY
+		point.OperatingProfitCNY = point.ProfitCNY
+		point.NetProfitCNY = point.OperatingProfitCNY
+		point.NetProfitComplete = point.Complete
 		point.SettledSaleCNY = roundProfitAmount(point.SettledSaleCNY)
 		point.UnmappedSaleCNY = roundProfitAmount(point.UnmappedSaleCNY)
 		point.UnsettledSaleCNY = roundProfitAmount(point.UnsettledSaleCNY)
@@ -691,11 +831,50 @@ func BuildProfitTrendWithUsage(profits []ProfitBucket, usage []UsageBucket, spec
 		_ = costUSD
 		points[i].CostCNY = roundProfitAmount(costCNY)
 		points[i].ProfitCNY = roundProfitAmount(points[i].SaleCNY - points[i].CostCNY)
+		points[i].ExternalSalesCNY = points[i].SaleCNY
+		points[i].OperatingProfitCNY = roundProfitAmount(points[i].ExternalSalesCNY - points[i].CostCNY)
+		points[i].NetProfitCNY = points[i].OperatingProfitCNY
 		if costCNY != 0 {
 			points[i].HasData = true
 		}
 		if !complete || !currencyOK {
 			points[i].Complete = false
+		}
+		points[i].NetProfitComplete = points[i].Complete
+	}
+	return points
+}
+
+// BuildProfitTrendWithPersonalUsage adds the Root-user usage series to the
+// gross sales/cost trend. The legacy wrapper can only infer source completeness
+// from the presence of rows, so callers with a source-level status should use
+// BuildProfitTrendWithPersonalUsageStatus.
+func BuildProfitTrendWithPersonalUsage(profits []ProfitBucket, usage []UsageBucket, personal []NewAPIPersonalUsageBucket, spec ProfitTrendSpec, location *time.Location, upstreamCostCNYPerUSD float64) []ProfitTrendPoint {
+	return BuildProfitTrendWithPersonalUsageStatus(profits, usage, personal, spec, location, upstreamCostCNYPerUSD, len(personal) > 0)
+}
+
+// BuildProfitTrendWithPersonalUsageStatus is the status-aware variant of
+// BuildProfitTrendWithPersonalUsage. An empty personal-use response is a
+// complete zero only when the source adapter explicitly confirms completeness.
+func BuildProfitTrendWithPersonalUsageStatus(profits []ProfitBucket, usage []UsageBucket, personal []NewAPIPersonalUsageBucket, spec ProfitTrendSpec, location *time.Location, upstreamCostCNYPerUSD float64, personalUsageComplete bool) []ProfitTrendPoint {
+	points := BuildProfitTrend(profits, spec, location)
+	if usage != nil {
+		points = BuildProfitTrendWithUsage(profits, usage, spec, location, upstreamCostCNYPerUSD)
+	}
+	for i := range points {
+		personalCNY, coverageComplete := SumPersonalUsageCNY(personal, points[i].StartAt, points[i].EndAt, spec.UsageResolutionSeconds)
+		if len(personal) == 0 && personalUsageComplete {
+			// An explicit successful empty response means zero Root usage.
+			coverageComplete = true
+		}
+		points[i].PersonalUsageCNY = roundProfitAmount(personalCNY)
+		points[i].PersonalUsageComplete = personalUsageComplete && coverageComplete
+		points[i].ExternalSalesCNY = roundProfitAmount(points[i].SaleCNY - points[i].PersonalUsageCNY)
+		points[i].OperatingProfitCNY = roundProfitAmount(points[i].ExternalSalesCNY - points[i].CostCNY)
+		points[i].NetProfitCNY = points[i].OperatingProfitCNY
+		points[i].NetProfitComplete = points[i].Complete && points[i].PersonalUsageComplete
+		if points[i].PersonalUsageCNY != 0 {
+			points[i].HasData = true
 		}
 	}
 	return points

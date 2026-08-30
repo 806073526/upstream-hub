@@ -16,6 +16,28 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+type completeZeroPersonalUsageReader struct{}
+
+func (completeZeroPersonalUsageReader) ListPersonalUsageBuckets(time.Time, time.Time, int) ([]storage.NewAPIPersonalUsageBucket, error) {
+	return nil, nil
+}
+
+func (completeZeroPersonalUsageReader) ListPersonalUsageBucketsWithStatus(time.Time, time.Time, int) ([]storage.NewAPIPersonalUsageBucket, bool, error) {
+	return nil, true, nil
+}
+
+type incompletePersonalUsageReader struct{}
+
+func (incompletePersonalUsageReader) ListPersonalUsageBuckets(time.Time, time.Time, int) ([]storage.NewAPIPersonalUsageBucket, error) {
+	return nil, nil
+}
+
+func (incompletePersonalUsageReader) ListPersonalUsageBucketsWithStatus(start, end time.Time, _ int) ([]storage.NewAPIPersonalUsageBucket, bool, error) {
+	return []storage.NewAPIPersonalUsageBucket{{
+		BucketStart: start, BucketEnd: end, PersonalUsageCNY: 2, Complete: false,
+	}}, false, nil
+}
+
 func newProfitTrendTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	t.Helper()
 	sqlDB, mock, err := sqlmock.New()
@@ -78,6 +100,194 @@ func TestDashboardProfitTrendRejectsUnknownRange(t *testing.T) {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/dashboard/profit-trend?range=year", nil))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+}
+
+func TestDashboardProfitTrendAcceptsExplicitCompleteZeroPersonalUsage(t *testing.T) {
+	db, mock := newProfitTrendTestDB(t)
+	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
+	oldNow := profitTrendNow
+	profitTrendNow = func() time.Time { return now }
+	t.Cleanup(func() { profitTrendNow = oldNow })
+	end := now.Truncate(time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "profit_buckets" WHERE bucket_start >= $1 AND bucket_start < $2 ORDER BY bucket_start ASC, new_api_channel_id ASC, id ASC`)).
+		WithArgs(end.Add(-24*time.Hour), end).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerDashboard(router.Group("/api"), &Deps{
+		Profit:        storage.NewProfit(db),
+		PersonalUsage: completeZeroPersonalUsageReader{},
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/dashboard/profit-trend?range=24h", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Summary struct {
+				PersonalUsageCNY      float64 `json:"personal_usage_cny"`
+				PersonalUsageComplete bool    `json:"personal_usage_complete"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Summary.PersonalUsageCNY != 0 || !response.Data.Summary.PersonalUsageComplete {
+		t.Fatalf("summary personal usage = %#v, want complete zero", response.Data.Summary)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDashboardProfitTrendTopLevelCompleteKeepsGrossProfitSemantics(t *testing.T) {
+	db, mock := newProfitTrendTestDB(t)
+	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
+	oldNow := profitTrendNow
+	profitTrendNow = func() time.Time { return now }
+	t.Cleanup(func() { profitTrendNow = oldNow })
+	end := now.Truncate(time.Hour)
+	start := end.Add(-time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "profit_buckets" WHERE bucket_start >= $1 AND bucket_start < $2 ORDER BY bucket_start ASC, new_api_channel_id ASC, id ASC`)).
+		WithArgs(end.Add(-24*time.Hour), end).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "billing_fact_key", "bucket_start", "bucket_end", "resolution_seconds", "new_api_channel_id", "upstream_channel_id", "mapping_status",
+			"group", "model_name", "normalization_status", "sale_cny", "cost_usd", "cost_cny", "profit_cny", "credit_usd_per_cny",
+			"allocation_status", "complete", "calculated_at", "updated_at",
+		}).AddRow(
+			1, "complete-sale", start, end, 3600, 12, nil, "unmapped",
+			"vip", "gpt-4o", "exact", 10.0, 4.0, 4.0, 6.0, 12.0,
+			"settled", true, now, now,
+		))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerDashboard(router.Group("/api"), &Deps{
+		Profit:        storage.NewProfit(db),
+		PersonalUsage: incompletePersonalUsageReader{},
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/dashboard/profit-trend?range=24h", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Complete bool `json:"complete"`
+			Summary  struct {
+				Complete              bool `json:"complete"`
+				PersonalUsageComplete bool `json:"personal_usage_complete"`
+				NetProfitComplete     bool `json:"net_profit_complete"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Data.Complete || !response.Data.Summary.Complete || response.Data.Summary.PersonalUsageComplete || response.Data.Summary.NetProfitComplete {
+		t.Fatalf("completeness = %#v, want gross complete and personal/net incomplete", response.Data)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDashboardProfitTrendDoesNotReuseStoredCostWhenConfiguredLedgerIsEmpty(t *testing.T) {
+	db, mock := newProfitTrendTestDB(t)
+	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
+	oldNow := profitTrendNow
+	profitTrendNow = func() time.Time { return now }
+	t.Cleanup(func() { profitTrendNow = oldNow })
+	end := now.Truncate(time.Hour)
+	start := end.Add(-time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "profit_buckets" WHERE bucket_start >= $1 AND bucket_start < $2 ORDER BY bucket_start ASC, new_api_channel_id ASC, id ASC`)).
+		WithArgs(end.Add(-24*time.Hour), end).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "billing_fact_key", "bucket_start", "bucket_end", "resolution_seconds", "new_api_channel_id", "upstream_channel_id", "mapping_status",
+			"group", "model_name", "normalization_status", "sale_cny", "cost_usd", "cost_cny", "profit_cny", "credit_usd_per_cny",
+			"allocation_status", "complete", "calculated_at", "updated_at",
+		}).AddRow(
+			1, "stored-cost", start, end, 3600, 12, nil, "unmapped",
+			"vip", "gpt-4o", "exact", 10.0, 4.0, 4.0, 6.0, 12.0,
+			"settled", true, now, now,
+		))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "usage_buckets" WHERE bucket_start >= $1 AND bucket_start < $2 AND resolution_seconds = $3 ORDER BY bucket_start ASC, channel_id ASC`)).
+		WithArgs(end.Add(-24*time.Hour), end, 3600).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerDashboard(router.Group("/api"), &Deps{
+		Profit:        storage.NewProfit(db),
+		Usage:         storage.NewUsage(db),
+		PersonalUsage: completeZeroPersonalUsageReader{},
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/dashboard/profit-trend?range=24h", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Summary struct {
+				CostCNY            float64 `json:"cost_cny"`
+				OperatingProfitCNY float64 `json:"operating_profit_cny"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Summary.CostCNY != 0 || response.Data.Summary.OperatingProfitCNY != 10 {
+		t.Fatalf("empty configured cost ledger reused stored cost: %#v", response.Data.Summary)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProfitReconciliationAcceptsExplicitCompleteZeroPersonalUsage(t *testing.T) {
+	db, mock := newProfitTrendTestDB(t)
+	now := time.Date(2026, 8, 27, 12, 17, 0, 0, time.UTC)
+	oldNow := profitTrendNow
+	profitTrendNow = func() time.Time { return now }
+	t.Cleanup(func() { profitTrendNow = oldNow })
+	end := now.Truncate(time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "profit_buckets" WHERE bucket_start >= $1 AND bucket_start < $2 ORDER BY bucket_start ASC, new_api_channel_id ASC, id ASC`)).
+		WithArgs(end.Add(-24*time.Hour), end).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerDashboard(router.Group("/api"), &Deps{
+		Profit:        storage.NewProfit(db),
+		PersonalUsage: completeZeroPersonalUsageReader{},
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/dashboard/profit-details?range=24h&kind=reconciliation", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Reconciliation struct {
+				PersonalUsageCNY      float64 `json:"personal_usage_cny"`
+				PersonalUsageComplete bool    `json:"personal_usage_complete"`
+			} `json:"reconciliation"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Reconciliation.PersonalUsageCNY != 0 || !response.Data.Reconciliation.PersonalUsageComplete {
+		t.Fatalf("reconciliation personal usage = %#v, want complete zero", response.Data.Reconciliation)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -234,5 +444,23 @@ func TestBuildProfitSaleDetailsPaginatesAggregatedRows(t *testing.T) {
 	items = buildProfitSaleDetailsPage(nil, usage, 1, map[uint]string{}, 2, 2)
 	if len(items) != 1 || items[0].ChannelID != 1 {
 		t.Fatalf("page 2 = %#v, want oldest aggregate row", items)
+	}
+}
+
+func TestProfitReconciliationJSONIncludesCanonicalOperatingFields(t *testing.T) {
+	payload, err := json.Marshal(profitReconciliation{
+		ExternalSalesCNY:   8,
+		OperatingProfitCNY: 4,
+		NetProfitCNY:       4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["external_sales_cny"] != float64(8) || fields["operating_profit_cny"] != float64(4) {
+		t.Fatalf("reconciliation JSON = %s, want canonical operating fields", payload)
 	}
 }

@@ -18,4 +18,3 @@ func TestCooldownFailuresAreNotNotifiable(t *testing.T) {
 type assertionError string
 
 func (e assertionError) Error() string { return string(e) }
-

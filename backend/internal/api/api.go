@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/worryzyy/upstream-hub/internal/auth"
@@ -32,6 +33,7 @@ type Deps struct {
 	Usage         *storage.Usage
 	Profit        *storage.Profit
 	Billing       *storage.Billing
+	PersonalUsage PersonalUsageReader
 	MonLogs       *storage.MonitorLogs
 	MonitorStates *storage.MonitorStates
 	ChannelSvc    *channel.Service
@@ -41,6 +43,38 @@ type Deps struct {
 
 	// Frontend 可选：传入嵌入的前端 dist 文件系统。nil 表示不挂载（本地开发用 vite dev server）。
 	Frontend fs.FS
+}
+
+// PersonalUsageReader is optional so older installations and focused API
+// tests can continue serving the gross-profit view while the personal-use
+// ledger is being migrated.
+type PersonalUsageReader interface {
+	ListPersonalUsageBuckets(start, end time.Time, resolutionSeconds int) ([]storage.NewAPIPersonalUsageBucket, error)
+}
+
+// PersonalUsageStatusReader is implemented by readers that can distinguish an
+// explicit successful zero-use response from an unavailable or not-yet-synced
+// personal-use ledger.
+type PersonalUsageStatusReader interface {
+	ListPersonalUsageBucketsWithStatus(start, end time.Time, resolutionSeconds int) ([]storage.NewAPIPersonalUsageBucket, bool, error)
+}
+
+func listPersonalUsageBucketsWithStatus(reader PersonalUsageReader, start, end time.Time, resolutionSeconds int) ([]storage.NewAPIPersonalUsageBucket, bool, error) {
+	if reader == nil {
+		return nil, false, nil
+	}
+	if statusReader, ok := reader.(PersonalUsageStatusReader); ok {
+		return statusReader.ListPersonalUsageBucketsWithStatus(start, end, resolutionSeconds)
+	}
+	rows, err := reader.ListPersonalUsageBuckets(start, end, resolutionSeconds)
+	if err != nil {
+		return nil, false, err
+	}
+	complete := false
+	if len(rows) > 0 {
+		_, complete = storage.SumPersonalUsageCNY(rows, start, end, resolutionSeconds)
+	}
+	return rows, complete, nil
 }
 
 // Register 把所有路由挂到给定 gin engine。
